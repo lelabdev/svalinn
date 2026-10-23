@@ -95,10 +95,19 @@ resolved. A “Lock Essentials” option was discussed there, but Svalinn's
 **copy-on-drop** design is a distinct proposed behavior.
 
 
-## Next tasks
+## Roadmap
 
-1. Choose and document a maintainable deployment path for the adapter (the smoke harness is not a user installation), then test in a disposable Zen profile and verify Zen update compatibility before enabling in the main profile.
-2. Extend pre-move duplication to multi-selected, cross-window, folder, tab-group and split-view cases.
-3. Add explicit temporary unlock and visual controls on top of the policy.
+The live, issue-linked plan is tracked in **[Roadmap #13 — features first, personal installation second](https://github.com/lelabdev/svalinn/issues/13)**.
+
+| Phase | Issues | Status / result |
+| --- | --- | --- |
+| 0. Foundation | [#1](https://github.com/lelabdev/svalinn/issues/1), [#2](https://github.com/lelabdev/svalinn/issues/2), [#3](https://github.com/lelabdev/svalinn/issues/3) | **Done and merged:** Zen test adapter, protected cross-zone duplication (single tab / same window), and close/demotion guards |
+| 1. Finish the actions | [#4](https://github.com/lelabdev/svalinn/issues/4), [#5](https://github.com/lelabdev/svalinn/issues/5) | **Next:** visual controls and temporary unlock; cross-window, multi-tab, workspace/container/folder/split-view safety |
+| 2. Test & stabilize | [#6](https://github.com/lelabdev/svalinn/issues/6) | CI and regressions against real Zen; may begin in parallel with phase 1 |
+| 3. Personal installation | [#12](https://github.com/lelabdev/svalinn/issues/12) | Package the **feature-complete** behavior for persistent use in the user's Zen; test on a disposable profile first |
+| 4. Distribution | [#7](https://github.com/lelabdev/svalinn/issues/7) | Install/uninstall, compatibility, releases for other users |
+| Parallel polish | [#8](https://github.com/lelabdev/svalinn/issues/8) | Final round-shield SVG icon; non-blocking |
+
+**Potential native Zen contribution:** only after the behavior is validated; propose it in Zen Discussions and, if welcomed, submit an opt-in implementation against `zen-browser/desktop`'s `dev` branch. This is **not** required to use Svalinn personally.
 
 **Safety:** do not patch `/opt/zen-browser-bin` or enable experimental scripts in the daily profile during development.
