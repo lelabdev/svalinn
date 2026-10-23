@@ -53,6 +53,41 @@ never uses `~/.zen`. See
 [`docs/zen-integration.md`](docs/zen-integration.md) for the mechanism, security
 model, and rollback steps.
 
+
+## Potential upstream contribution to Zen Browser
+
+Svalinn is developed **specifically for Zen Browser** and is useful as a standalone
+personal customization. A longer-term possibility is to contribute the behavior
+**natively to Zen**, so users would not need a privileged mod. **This is only a
+proposal:** no upstream PR has been opened and the Zen maintainers have not
+accepted the feature.
+
+Proposed approach:
+
+1. Keep implementing and validating the behavior in
+   [lelabdev/svalinn](https://github.com/lelabdev/svalinn), starting with
+   copy-on-drop: dragging a Pinned or Essential outside its category creates a
+   copy in the destination while the original stays in place.
+2. Present the idea in [Zen Browser GitHub Discussions](https://github.com/zen-browser/desktop/discussions)
+   **before submitting a feature PR**, as recommended in Zen's README.
+   Suggest an **opt-in setting disabled by default** so existing users keep the
+   current drag-and-drop behavior.
+3. If maintainers are interested, fork
+   [zen-browser/desktop](https://github.com/zen-browser/desktop), develop from
+   the upstream `dev` branch, follow
+   [Zen's contribution guidelines](https://github.com/zen-browser/desktop/blob/dev/docs/contribute.md),
+   and open a focused, tested PR for native integration.
+4. Continue maintaining Svalinn as a separate prototype/personal tool unless
+   and until native support is accepted and shipped. An upstream PR is **not**
+   the same as an accepted or released feature.
+
+Related upstream discussion: [zen-browser/desktop#11278 —
+“Tabs and essentials easy to accidentally drag off”](https://github.com/zen-browser/desktop/issues/11278).
+The issue is **closed** after the original drag sensitivity problem was reported
+resolved. A “Lock Essentials” option was discussed there, but Svalinn's
+**copy-on-drop** design is a distinct proposed behavior.
+
+
 ## Next tasks
 
 1. Build close/unpin/Essential-removal interception; ensure explicit unlock, browser exit and session recovery continue working.
