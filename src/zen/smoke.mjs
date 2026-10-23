@@ -38,7 +38,7 @@ const PROFILE_PREFS = {
   "app.update.enabled": false,
   "zen.welcome-screen.seen": true,
   "zen.watermark.enabled": false,
-  "svalinn.enabled": true,
+  "svalinn.enabled": false,
   "toolkit.legacyUserProfileCustomizations.stylesheets": true,
 };
 
@@ -834,7 +834,7 @@ return {
   );
 }
 
-async function runUnlockScenarios(client, urls) {
+async function runCssMenuScenarios(client, urls) {
   return runScript(
     client,
     `
@@ -844,13 +844,6 @@ const gBrowser = win.gBrowser;
 const manager = win.gZenPinnedTabManager;
 const doc = win.document;
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-const tabsInclude = tab => [...gBrowser.tabs].includes(tab);
-const zone = tab =>
-  tab.hasAttribute("zen-essential")
-    ? "essential"
-    : tab.pinned
-      ? "pinned"
-      : "normal";
 const closeDisplay = tab => {
   const button = tab.querySelector(".tab-close-button");
   return button ? win.getComputedStyle(button).display : null;
@@ -859,7 +852,7 @@ const principal = Services.scriptSecurityManager.getSystemPrincipal();
 const base = ${JSON.stringify(urls.normal)};
 let seq = 0;
 const makeTab = async ({ pinned = false, essential = false } = {}) => {
-  const tab = gBrowser.addTab(base + "#unlock-" + ++seq, {
+  const tab = gBrowser.addTab(base + "#css-" + ++seq, {
     triggeringPrincipal: principal,
     inBackground: true,
   });
@@ -872,19 +865,8 @@ const makeTab = async ({ pinned = false, essential = false } = {}) => {
 };
 const results = [];
 const check = (name, ok, details) => results.push({ name, ok, details });
-
-const menu = doc.getElementById("tabContextMenu");
-const unlockItem = doc.getElementById("context_svalinn-unlock");
-if (!menu || !unlockItem) {
-  throw new Error("Svalinn context-menu hook is missing");
-}
-const showMenuFor = async tab => {
-  gBrowser.selectedTab = tab;
-  win.TabContextMenu.contextTab = tab;
-  win.TabContextMenu.updateContextMenu(menu);
-  menu.dispatchEvent(new win.Event("popupshowing", { bubbles: true }));
-  await wait(50);
-};
+const blocked = id =>
+  doc.getElementById(id)?.getAttribute("svalinn-blocked") === "true";
 const hidden = id => Boolean(doc.getElementById(id)?.hidden);
 
 const pinned = await makeTab({ pinned: true });
@@ -895,121 +877,123 @@ check(
   "css-close-buttons",
   closeDisplay(pinned) === "none" &&
     closeDisplay(essential) === "none" &&
-    closeDisplay(normal) !== "none",
+    closeDisplay(normal) !== "none" &&
+    doc.documentElement.hasAttribute("svalinn-active"),
   {
     pinned: closeDisplay(pinned),
     essential: closeDisplay(essential),
     normal: closeDisplay(normal),
+    activeMarker: doc.documentElement.hasAttribute("svalinn-active"),
+  }
+);
+
+const folderTab = await makeTab({ pinned: true });
+const folder = win.gZenFolders.createFolder([folderTab]);
+await wait(400);
+check(
+  "css-folder-tab",
+  Boolean(folderTab.closest("zen-folder")) &&
+    closeDisplay(folderTab) === "none",
+  {
+    inFolder: Boolean(folderTab.closest("zen-folder")),
+    closeDisplay: closeDisplay(folderTab),
+  }
+);
+
+const menu = doc.getElementById("tabContextMenu");
+const nativeMenuState = tab => {
+  gBrowser.selectedTab = tab;
+  win.TabContextMenu.contextTab = tab;
+  win.TabContextMenu.updateContextMenu(menu);
+  return {
+    closeHidden: hidden("context_closeTab"),
+    unpinHidden: hidden("context_unpinTab"),
+    removeHidden: hidden("context_zen-remove-essential"),
+  };
+};
+const showMenuFor = async tab => {
+  nativeMenuState(tab);
+  menu.dispatchEvent(new win.Event("popupshowing", { bubbles: true }));
+  await wait(50);
+};
+
+const pinnedNative = nativeMenuState(pinned);
+await showMenuFor(pinned);
+check(
+  "context-menu-locked-pinned",
+  blocked("context_closeTab") &&
+    blocked("context_unpinTab") &&
+    hidden("context_closeTab") === pinnedNative.closeHidden &&
+    hidden("context_unpinTab") === pinnedNative.unpinHidden,
+  {
+    closeBlocked: blocked("context_closeTab"),
+    unpinBlocked: blocked("context_unpinTab"),
+    closeHidden: hidden("context_closeTab"),
+    unpinHidden: hidden("context_unpinTab"),
+    native: pinnedNative,
+  }
+);
+
+const essentialNative = nativeMenuState(essential);
+await showMenuFor(essential);
+check(
+  "context-menu-locked-essential",
+  blocked("context_closeTab") &&
+    blocked("context_zen-remove-essential") &&
+    hidden("context_closeTab") === essentialNative.closeHidden &&
+    hidden("context_zen-remove-essential") === essentialNative.removeHidden,
+  {
+    closeBlocked: blocked("context_closeTab"),
+    removeBlocked: blocked("context_zen-remove-essential"),
+    closeHidden: hidden("context_closeTab"),
+    removeHidden: hidden("context_zen-remove-essential"),
+    native: essentialNative,
+  }
+);
+
+const normalNative = nativeMenuState(normal);
+await showMenuFor(normal);
+check(
+  "context-menu-normal-native",
+  !blocked("context_closeTab") &&
+    !blocked("context_unpinTab") &&
+    !blocked("context_zen-remove-essential") &&
+    hidden("context_closeTab") === normalNative.closeHidden &&
+    hidden("context_unpinTab") === normalNative.unpinHidden &&
+    hidden("context_zen-remove-essential") === normalNative.removeHidden,
+  {
+    closeHidden: hidden("context_closeTab"),
+    unpinHidden: hidden("context_unpinTab"),
+    removeHidden: hidden("context_zen-remove-essential"),
+    native: normalNative,
   }
 );
 
 await showMenuFor(pinned);
-check(
-  "context-menu-locked-pinned",
-  hidden("context_closeTab") &&
-    hidden("context_unpinTab") &&
-    Boolean(unlockItem) && unlockItem.hidden === false,
-  {
-    closeHidden: hidden("context_closeTab"),
-    unpinHidden: hidden("context_unpinTab"),
-    unlockVisible: unlockItem ? !unlockItem.hidden : null,
-    label: unlockItem?.getAttribute("label") ?? null,
-  }
-);
-
-await showMenuFor(essential);
-check(
-  "context-menu-locked-essential",
-  hidden("context_closeTab") &&
-    hidden("context_zen-remove-essential") &&
-    Boolean(unlockItem) && unlockItem.hidden === false,
-  {
-    closeHidden: hidden("context_closeTab"),
-    removeEssentialHidden: hidden("context_zen-remove-essential"),
-    unlockVisible: unlockItem ? !unlockItem.hidden : null,
-  }
-);
-
 await showMenuFor(normal);
 check(
-  "context-menu-normal",
-  hidden("context_closeTab") === false &&
-    Boolean(unlockItem) && unlockItem.hidden === true,
+  "context-menu-reopen-native",
+  !blocked("context_closeTab") &&
+    hidden("context_closeTab") === normalNative.closeHidden &&
+    hidden("context_unpinTab") === normalNative.unpinHidden &&
+    hidden("context_zen-remove-essential") === normalNative.removeHidden,
   {
-    closeHidden: hidden("context_closeTab"),
-    unlockVisible: unlockItem ? !unlockItem.hidden : null,
-  }
-);
-
-const menuUnlock = await makeTab({ pinned: true });
-await showMenuFor(menuUnlock);
-unlockItem.dispatchEvent(new win.Event("command", { bubbles: true }));
-await wait(50);
-check(
-  "menu-unlock",
-  menuUnlock.hasAttribute("svalinn-unlocked") &&
-    api.isTabUnlocked(menuUnlock) &&
-    closeDisplay(menuUnlock) !== "none",
-  {
-    unlocked: api.isTabUnlocked(menuUnlock),
-    closeDisplay: closeDisplay(menuUnlock),
-    label: unlockItem.getAttribute("label"),
-  }
-);
-
-await showMenuFor(menuUnlock);
-check(
-  "context-menu-unlocked",
-  hidden("context_closeTab") === false &&
-    hidden("context_unpinTab") === false &&
-    unlockItem.hidden === false &&
-    unlockItem.getAttribute("label") === "Lock Svalinn now",
-  {
+    closeBlocked: blocked("context_closeTab"),
     closeHidden: hidden("context_closeTab"),
     unpinHidden: hidden("context_unpinTab"),
-    label: unlockItem.getAttribute("label"),
+    removeHidden: hidden("context_zen-remove-essential"),
   }
 );
 
-gBrowser.removeTab(menuUnlock);
 check(
-  "unlock-one-shot-close",
-  !tabsInclude(menuUnlock) && !api.isTabUnlocked(menuUnlock),
-  { present: tabsInclude(menuUnlock), unlocked: api.isTabUnlocked(menuUnlock) }
-);
-
-const expiring = await makeTab({ pinned: true });
-api.unlockTab(expiring, { timeoutMs: 60 });
-await wait(150);
-const expiredBlocked = tabsInclude(expiring);
-gBrowser.removeTab(expiring);
-check(
-  "unlock-auto-relock",
-  expiredBlocked &&
-    !api.isTabUnlocked(expiring) &&
-    !expiring.hasAttribute("svalinn-unlocked") &&
-    tabsInclude(expiring) &&
-    closeDisplay(expiring) === "none",
-  {
-    stillPresent: tabsInclude(expiring),
-    unlocked: api.isTabUnlocked(expiring),
-    attribute: expiring.hasAttribute("svalinn-unlocked"),
-    closeDisplay: closeDisplay(expiring),
-  }
-);
-
-api.lockAll();
-check(
-  "lock-defaults",
-  api.lockState().locked === true &&
-    api.unlockedCount() === 0 &&
-    Services.prefs.getBoolPref("svalinn.enabled", false) === true,
-  { lock: api.lockState() }
+  "context-menu-style-present",
+  Boolean(doc.getElementById("svalinn-menu-style")),
+  { style: Boolean(doc.getElementById("svalinn-menu-style")) }
 );
 
 return {
   results,
-  lock: api.lockState(),
+  activeMarker: doc.documentElement.hasAttribute("svalinn-active"),
   warnings: api.snapshot().warnings,
 };`,
     { timeoutMs: 60_000 }
@@ -1132,6 +1116,33 @@ export async function runSmoke(options) {
     const ready = await waitForZenReady(client, options.timeoutMs);
     record("startup", ready.app === "Zen" && ready.ready, ready);
 
+    phase = "css-preinstall";
+    const preCss = await runScript(
+      client,
+      `
+const win = [...Services.wm.getEnumerator("navigator:browser")][0];
+const gBrowser = win.gBrowser;
+const tab = gBrowser.addTab(${JSON.stringify(profileInfo.urls.normal + "#pre-css")}, {
+  triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
+  inBackground: true,
+});
+await new Promise(resolve => setTimeout(resolve, 150));
+gBrowser.pinTab(tab);
+await new Promise(resolve => setTimeout(resolve, 200));
+const button = tab.querySelector(".tab-close-button");
+const display = button ? win.getComputedStyle(button).display : null;
+const activeMarker = win.document.documentElement.hasAttribute("svalinn-active");
+gBrowser.removeTab(tab);
+return { display, activeMarker };
+`,
+      { timeoutMs: 20_000 }
+    );
+    record(
+      "css-inactive-before-install",
+      preCss.activeMarker === false,
+      preCss
+    );
+
     phase = "injection";
     const injected = await ensureAdapter(client, 30_000);
     record("adapter-injected", injected.adapter === "0.4.0" && injected.policy.length >= 4, injected);
@@ -1203,18 +1214,18 @@ export async function runSmoke(options) {
       { closeGuarded: closeChecks.closeGuarded }
     );
 
-    phase = "unlock-ui";
-    const unlockChecks = await runUnlockScenarios(
+    phase = "css-menu";
+    const cssMenuChecks = await runCssMenuScenarios(
       client,
       profileInfo.urls
     );
-    for (const result of unlockChecks.results) {
+    for (const result of cssMenuChecks.results) {
       record(result.name, result.ok, result.details);
     }
     record(
-      "unlock-defaults-safe",
-      unlockChecks.lock.locked === true && unlockChecks.lock.unlocked === 0,
-      unlockChecks.lock
+      "active-marker-installed",
+      cssMenuChecks.activeMarker === true,
+      { activeMarker: cssMenuChecks.activeMarker }
     );
 
     const afterDropSnapshot = await runAdapter(client, `return api.snapshot();`);
@@ -1256,6 +1267,33 @@ export async function runSmoke(options) {
         markerState.hooked === 0 &&
         markerState.closeHooked === 0,
       { status: uninstalled.status, tabsChanged: afterUninstall !== before, markerState }
+    );
+
+    phase = "css-uninstall";
+    const postCss = await runScript(
+      client,
+      `
+const win = [...Services.wm.getEnumerator("navigator:browser")][0];
+const tab = win.gBrowser.addTab(${JSON.stringify(profileInfo.urls.normal + "#post-css")}, {
+  triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
+  inBackground: true,
+});
+await new Promise(resolve => setTimeout(resolve, 150));
+win.gBrowser.pinTab(tab);
+await new Promise(resolve => setTimeout(resolve, 200));
+const button = tab.querySelector(".tab-close-button");
+const display = button ? win.getComputedStyle(button).display : null;
+const activeMarker = win.document.documentElement.hasAttribute("svalinn-active");
+const menuStyle = Boolean(win.document.getElementById("svalinn-menu-style"));
+win.gBrowser.removeTab(tab);
+return { display, activeMarker, menuStyle };
+`,
+      { timeoutMs: 20_000 }
+    );
+    record(
+      "css-restored-after-uninstall",
+      postCss.activeMarker === false && postCss.menuStyle === false,
+      postCss
     );
 
     phase = "disabled";
@@ -1302,8 +1340,11 @@ const attached = Boolean(second.__svalinn);
 const sameInstance = second.__svalinn === globalThis.Svalinn;
 const firstAttached = Boolean(win.__svalinn);
 const secondCloseHooked = Boolean(second.gBrowser.__svalinnCloseHook);
-const secondUnlockMenu = Boolean(
-  second.document.getElementById("context_svalinn-unlock")
+const secondActiveMarker = second.document.documentElement.hasAttribute(
+  "svalinn-active"
+);
+const secondMenuStyle = Boolean(
+  second.document.getElementById("svalinn-menu-style")
 );
 const closeGuarded = globalThis.Svalinn.closeGuardedWindows();
 const snapshot = globalThis.Svalinn.snapshot();
@@ -1316,7 +1357,8 @@ return {
   sameInstance,
   firstAttached,
   secondCloseHooked,
-  secondUnlockMenu,
+  secondActiveMarker,
+  secondMenuStyle,
   closeGuarded,
   windows,
   windowsWithManager,
@@ -1334,7 +1376,8 @@ return {
         multi.sameInstance === true &&
         multi.firstAttached === true &&
         multi.secondCloseHooked === true &&
-        multi.secondUnlockMenu === true &&
+        multi.secondActiveMarker === true &&
+        multi.secondMenuStyle === true &&
         multi.closeGuarded >= 2 &&
         multi.windows >= 2 &&
         multi.windowsWithManager >= 2 &&
@@ -1376,7 +1419,6 @@ return {
         `return {
           drop: api.hookedWindows(),
           close: api.closeGuardedWindows(),
-          unlocked: api.unlockedCount(),
         };`
       );
       record(
@@ -1384,7 +1426,6 @@ return {
         restoredInstall.status === "installed" &&
           restoredHooks.drop >= 1 &&
           restoredHooks.close >= 1 &&
-          restoredHooks.unlocked === 0 &&
           afterRestartInstall === fingerprint(restoredSnapshot),
         { status: restoredInstall.status, hooked: restoredHooks }
       );

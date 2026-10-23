@@ -15,7 +15,8 @@
   const DROP_HOOK = "__svalinnDropHook";
   const CLOSE_HOOK = "__svalinnCloseHook";
   const CONTEXT_HOOK = "__svalinnContextHook";
-  const UNLOCK_ATTR = "svalinn-unlocked";
+  const ACTIVE_ATTR = "svalinn-active";
+  const MENU_BLOCK_ATTR = "svalinn-blocked";
   const ENABLED_PREF = "svalinn.enabled";
 
   const state = {
@@ -29,8 +30,6 @@
     restoredTabs: new WeakSet(),
     restoreTimeoutMs: 10_000,
     bypass: 0,
-    unlocks: new Map(),
-    unlockTimeoutMs: 15_000,
   };
 
   function browserWindows() {
@@ -55,9 +54,9 @@
 
   function prefEnabled() {
     try {
-      return Boolean(Services.prefs.getBoolPref(ENABLED_PREF, true));
+      return Boolean(Services.prefs.getBoolPref(ENABLED_PREF, false));
     } catch {
-      return true;
+      return false;
     }
   }
 
@@ -184,20 +183,14 @@
         };
       }
 
-      const unlocked = isTabUnlocked(source);
       const decision = decideDrop({
         tab: flags,
         targetZone,
         sameWindow: true,
-        locked: !unlocked,
+        locked: true,
       });
       if (decision === "native") {
-        return {
-          action: "native",
-          source,
-          consumeUnlock:
-            unlocked && zoneOf(flags) !== targetZone,
-        };
+        return { action: "native", source };
       }
       if (decision !== "duplicate") {
         return {
@@ -451,7 +444,6 @@
 
       const plan = planDrop(win, this, event);
       if (plan.action === "native") {
-        if (plan.consumeUnlock) consumeUnlock(plan.source);
         return original.call(this, event);
       }
 
@@ -531,102 +523,15 @@
     return true;
   }
 
-  function relockTab(tab) {
-    const entry = state.unlocks.get(tab);
-    if (entry) {
-      if (entry.timer) clearTimeout(entry.timer);
-      state.unlocks.delete(tab);
-    }
-    try {
-      tab?.removeAttribute?.(UNLOCK_ATTR);
-    } catch {
-      // Ignore a closed or detached tab.
-    }
-  }
-
-  function isTabUnlocked(tab) {
-    if (!tab) return false;
-    const entry = state.unlocks.get(tab);
-    if (!entry) return false;
-    if (Date.now() >= entry.expiresAt) {
-      relockTab(tab);
-      return false;
-    }
-    return true;
-  }
-
-  function unlockTab(tab, { timeoutMs = state.unlockTimeoutMs } = {}) {
-    if (!tab || !isProtected(readTabFlags(tab))) {
-      return { unlocked: false, reason: "not-protected" };
-    }
-    if (!state.installed || !state.enabled) {
-      return { unlocked: false, reason: "disabled" };
-    }
-    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-      return { unlocked: false, reason: "invalid-timeout" };
-    }
-
-    relockTab(tab);
-    const expiresAt = Date.now() + timeoutMs;
-    const timer = setTimeout(() => relockTab(tab), timeoutMs);
-    state.unlocks.set(tab, { expiresAt, timer });
-    try {
-      tab.setAttribute(UNLOCK_ATTR, "true");
-    } catch (error) {
-      state.warnings.push(`unlock-attribute: ${error}`);
-    }
-    return { unlocked: true, expiresAt, timeoutMs };
-  }
-
-  function consumeUnlock(tab) {
-    relockTab(tab);
-  }
-
-  function lockAll() {
-    for (const tab of [...state.unlocks.keys()]) relockTab(tab);
-  }
-
-  function lockWindow(win) {
-    for (const tab of [...state.unlocks.keys()]) {
-      let sameWindow = false;
-      try {
-        sameWindow =
-          tab.documentGlobal === win || tab.ownerGlobal === win;
-      } catch {
-        sameWindow = false;
-      }
-      if (sameWindow) relockTab(tab);
-    }
-  }
-
-  function unlockedCount() {
-    for (const tab of [...state.unlocks.keys()]) isTabUnlocked(tab);
-    return state.unlocks.size;
-  }
-
-  function lockState() {
-    return {
-      locked: state.enabled !== false,
-      timeoutMs: state.unlockTimeoutMs,
-      unlocked: unlockedCount(),
-    };
-  }
-
   function canPerform(win, tab, action) {
     if (!guardActive(win) || !tab || tab.closing === true) return true;
     return (
       decideAction({
         tab: readTabFlags(tab),
         action,
-        locked: !isTabUnlocked(tab),
+        locked: true,
       }) !== "block"
     );
-  }
-
-  function consumeUnlockIfUsed(win, tab) {
-    if (guardActive(win) && tab && isTabUnlocked(tab)) {
-      consumeUnlock(tab);
-    }
   }
 
   function resolveEssentialsTargets(win, tab) {
@@ -674,54 +579,41 @@
     };
 
     gBrowser.removeTab = function (tab, options) {
-      const unlocked = isTabUnlocked(tab);
       if (!canPerform(win, tab, "close")) {
         warnBlocked("close", tab);
         return undefined;
       }
-      if (unlocked) consumeUnlockIfUsed(win, tab);
       return originals.removeTab.call(this, tab, options);
     };
 
     gBrowser.removeTabs = function (tabs, options) {
       const list = Array.from(tabs ?? []);
-      const unlockedTabs = new Set(list.filter(tab => isTabUnlocked(tab)));
       const allowed = list.filter(tab => canPerform(win, tab, "close"));
       if (allowed.length === list.length) {
-        for (const tab of allowed) {
-          if (unlockedTabs.has(tab)) consumeUnlockIfUsed(win, tab);
-        }
         return originals.removeTabs.call(this, tabs, options);
       }
       warnBlocked(
         "close",
         list.filter(tab => !allowed.includes(tab))
       );
-      for (const tab of allowed) {
-        if (unlockedTabs.has(tab)) consumeUnlockIfUsed(win, tab);
-      }
       if (!allowed.length) return undefined;
       return originals.removeTabs.call(this, allowed, options);
     };
 
     gBrowser.removeCurrentTab = function (options) {
       const tab = this.selectedTab;
-      const unlocked = isTabUnlocked(tab);
       if (!canPerform(win, tab, "close")) {
         warnBlocked("close", tab);
         return undefined;
       }
-      if (unlocked) consumeUnlockIfUsed(win, tab);
       return originals.removeCurrentTab.call(this, options);
     };
 
     gBrowser.unpinTab = function (tab, options) {
-      const unlocked = isTabUnlocked(tab);
       if (!canPerform(win, tab, "unpin")) {
         warnBlocked("unpin", tab);
         return undefined;
       }
-      if (unlocked) consumeUnlockIfUsed(win, tab);
       return originals.unpinTab.call(this, tab, options);
     };
 
@@ -734,7 +626,6 @@
         warnBlocked("remove-essential", blocked);
         return undefined;
       }
-      for (const targetTab of targets) consumeUnlockIfUsed(win, targetTab);
       return originals.removeEssentials.call(this, tab, unpin);
     };
 
@@ -748,7 +639,6 @@
           warnBlocked("close-group", blocked);
           return Promise.resolve();
         }
-        for (const tab of tabs) consumeUnlockIfUsed(win, tab);
         return originals.removeTabGroup.call(this, group, options);
       };
     }
@@ -788,90 +678,49 @@
     "context_zen-remove-essential",
   ]);
 
-  function updateContextMenu(win, item) {
-    const tab = win?.TabContextMenu?.contextTab;
-    const protectedTab = Boolean(tab && isProtected(readTabFlags(tab)));
-    const unlocked = protectedTab && isTabUnlocked(tab);
+  function updateContextMenu(win) {
     const doc = win?.document;
-
-    if (item) {
-      item.hidden = !protectedTab;
-      if (protectedTab) {
-        item.setAttribute(
-          "label",
-          unlocked
-            ? "Lock Svalinn now"
-            : "Unlock Svalinn (one action)"
-        );
-      }
-    }
-
-    if (!protectedTab || unlocked) {
-      if (protectedTab && unlocked) {
-        const closeTab = doc?.getElementById?.("context_closeTab");
-        if (closeTab) closeTab.hidden = false;
-      }
-      return;
-    }
+    if (!doc) return;
 
     for (const id of MANAGED_MENU_ITEMS) {
-      const node = doc?.getElementById?.(id);
-      if (node) node.hidden = true;
+      doc.getElementById(id)?.removeAttribute(MENU_BLOCK_ATTR);
+    }
+
+    const tab = win?.TabContextMenu?.contextTab;
+    if (!tab || !isProtected(readTabFlags(tab))) return;
+
+    for (const id of MANAGED_MENU_ITEMS) {
+      doc.getElementById(id)?.setAttribute(MENU_BLOCK_ATTR, "true");
     }
   }
 
   /**
-   * Add the temporary-unlock entry and hide destructive actions for locked
-   * protected tabs. Optional: headless/test scopes may not have a menu.
+   * Keep destructive menu commands visually unavailable while locked without
+   * mutating Zen's own hidden/disabled state. An attribute plus a small style
+   * rule only adds Svalinn's restriction; native menu state remains authoritative.
    */
   function installContextMenuHook(win) {
     const doc = win?.document;
     const menu = doc?.getElementById?.("tabContextMenu");
     if (!doc || !menu) return false;
+    if (menu[CONTEXT_HOOK]) return true;
 
-    const existing = menu[CONTEXT_HOOK];
-    if (existing) return true;
-
-    let item = doc.getElementById("context_svalinn-unlock");
-    if (!item) {
-      item = doc.createXULElement
-        ? doc.createXULElement("menuitem")
-        : doc.createElement("menuitem");
-      item.id = "context_svalinn-unlock";
-      item.setAttribute("label", "Unlock Svalinn (one action)");
-      item.setAttribute("hidden", "true");
-      const anchor =
-        doc.getElementById("context_zen-remove-essential") ??
-        doc.getElementById("context_pinTab");
-      if (anchor?.after) anchor.after(item);
-      else menu.appendChild(item);
+    let style = doc.getElementById("svalinn-menu-style");
+    if (!style) {
+      style = doc.createElement("style");
+      style.id = "svalinn-menu-style";
+      style.textContent =
+        '#tabContextMenu [svalinn-blocked="true"] { display: none !important; }';
+      doc.documentElement.appendChild(style);
     }
 
-    const resetHidden = () => {
-      for (const id of MANAGED_MENU_ITEMS) {
-        const node = doc.getElementById(id);
-        if (node) node.hidden = false;
-      }
-    };
-    const onCaptureShowing = event => {
-      if (event?.target?.id === "tabContextMenu") resetHidden();
-    };
     const onShowing = event => {
-      if (event?.target?.id === "tabContextMenu") updateContextMenu(win, item);
+      if (event?.target?.id === "tabContextMenu") updateContextMenu(win);
     };
-    const onCommand = () => {
-      const tab = win.TabContextMenu?.contextTab;
-      if (!tab) return;
-      if (isTabUnlocked(tab)) relockTab(tab);
-      else unlockTab(tab);
-    };
-
-    doc.addEventListener("popupshowing", onCaptureShowing, true);
     menu.addEventListener("popupshowing", onShowing);
-    item.addEventListener("command", onCommand);
 
     Object.defineProperty(menu, CONTEXT_HOOK, {
-      value: { item, onCaptureShowing, onShowing, onCommand },
+      value: { style, onShowing },
       configurable: true,
       writable: false,
       enumerable: false,
@@ -885,17 +734,25 @@
     const hook = menu?.[CONTEXT_HOOK];
     if (!hook) return;
     try {
-      doc.removeEventListener(
-        "popupshowing",
-        hook.onCaptureShowing,
-        true
-      );
       menu.removeEventListener("popupshowing", hook.onShowing);
-      hook.item.removeEventListener("command", hook.onCommand);
-      hook.item.remove();
+      for (const id of MANAGED_MENU_ITEMS) {
+        doc.getElementById(id)?.removeAttribute(MENU_BLOCK_ATTR);
+      }
+      hook.style?.remove();
       delete menu[CONTEXT_HOOK];
     } catch (error) {
       state.warnings.push(`context-menu-unhook: ${error}`);
+    }
+  }
+
+  function setActiveMarker(win, active) {
+    try {
+      win?.document?.documentElement?.toggleAttribute?.(
+        ACTIVE_ATTR,
+        Boolean(active)
+      );
+    } catch (error) {
+      state.warnings.push(`active-marker: ${error}`);
     }
   }
 
@@ -932,11 +789,12 @@
       }
     }
     state.windows.add(win);
+    setActiveMarker(win, true);
     return true;
   }
 
   function detachWindow(win) {
-    lockWindow(win);
+    setActiveMarker(win, false);
     removeContextMenuHook(win);
     removeCloseHook(win);
     removeDropHook(win);
@@ -992,7 +850,6 @@
       enabled: state.enabled,
       windows: state.windows.size,
       pending: state.pending.size,
-      lock: lockState(),
       capabilities: state.capabilities,
       warnings: [...state.warnings],
       ...extra,
@@ -1011,7 +868,6 @@
       waitForStartup = true,
       timeoutMs = 30_000,
       restoreTimeoutMs = 10_000,
-      unlockTimeoutMs = 15_000,
       allowUnverifiedVersion = false,
     } = options;
 
@@ -1022,9 +878,7 @@
     state.enabled = enabled ?? prefEnabled();
     state.capabilities = null;
     state.restoreTimeoutMs = restoreTimeoutMs;
-    state.unlockTimeoutMs = unlockTimeoutMs;
     state.warnings.length = 0;
-    lockAll();
     cancelAllPending("reinstall");
     state.restoredTabs = new WeakSet();
 
@@ -1082,7 +936,6 @@
   }
 
   function uninstall() {
-    lockAll();
     cancelAllPending("uninstall");
     removeWindowObserver();
     for (const win of [...state.windows]) detachWindow(win);
@@ -1111,7 +964,6 @@
       adapter: ADAPTER_VERSION,
       installed: state.installed,
       enabled: state.enabled,
-      lock: lockState(),
       windows,
       warnings: [...state.warnings],
       pending: state.pending.size,
@@ -1148,12 +1000,6 @@
     hookedWindows,
     closeGuardedWindows,
     pendingDuplications,
-    unlockTab,
-    lockTab: relockTab,
-    lockAll,
-    isTabUnlocked,
-    unlockedCount,
-    lockState,
     classify,
     policy: {
       ZONES,
