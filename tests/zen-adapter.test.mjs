@@ -288,13 +288,14 @@ function makeDropTab(url, { pinned = false, essential = false } = {}) {
 
 function makeFakeDocument() {
   const elements = new Map();
-  const menuListeners = new Map();
 
   const makeElement = (id, hidden = false) => {
     const attributes = new Map();
-    return {
+    const listeners = new Map();
+    const node = {
       id,
       hidden,
+      textContent: "",
       attrs: attributes,
       setAttribute(name, value) {
         attributes.set(name, String(value));
@@ -305,36 +306,43 @@ function makeFakeDocument() {
       removeAttribute(name) {
         attributes.delete(name);
       },
-      addEventListener() {},
-      removeEventListener() {},
+      addEventListener(type, listener) {
+        const entries = listeners.get(type) ?? [];
+        entries.push(listener);
+        listeners.set(type, entries);
+      },
+      removeEventListener(type, listener) {
+        const entries = listeners.get(type) ?? [];
+        const index = entries.indexOf(listener);
+        if (index !== -1) entries.splice(index, 1);
+      },
+      dispatchEvent(event) {
+        for (const listener of listeners.get(event.type) ?? []) {
+          listener(event);
+        }
+        return true;
+      },
+      after(other) {
+        if (other?.id) elements.set(other.id, other);
+      },
+      appendChild(other) {
+        if (other?.id) elements.set(other.id, other);
+      },
       remove() {
-        elements.delete(id);
+        if (node.id) elements.delete(node.id);
       },
     };
+    return node;
   };
 
   const menu = makeElement("tabContextMenu");
-  menu.addEventListener = (type, listener) => {
-    const entries = menuListeners.get(type) ?? [];
-    entries.push(listener);
-    menuListeners.set(type, entries);
-  };
-  menu.removeEventListener = (type, listener) => {
-    const entries = menuListeners.get(type) ?? [];
-    const index = entries.indexOf(listener);
-    if (index !== -1) entries.splice(index, 1);
-  };
-  menu.dispatchEvent = event => {
-    for (const listener of menuListeners.get(event.type) ?? []) listener(event);
-    return true;
-  };
-
   elements.set("tabContextMenu", menu);
   for (const [id, hidden] of [
     ["context_closeTab", false],
     ["context_unpinTab", true],
     ["context_unpinSelectedTabs", true],
     ["context_zen-remove-essential", true],
+    ["context_pinTab", false],
   ]) {
     elements.set(id, makeElement(id, hidden));
   }
@@ -367,16 +375,8 @@ function makeFakeDocument() {
   return {
     documentElement,
     getElementById: id => elements.get(id) ?? null,
-    createElement: () => {
-      const node = {
-        id: "",
-        textContent: "",
-        remove() {
-          if (node.id) elements.delete(node.id);
-        },
-      };
-      return node;
-    },
+    createElement: () => makeElement(""),
+    createXULElement: () => makeElement(""),
     elements,
     menu,
   };
@@ -536,7 +536,7 @@ function makeDropEnvironment() {
     removeEssentials(tab, unpin = true) {
       stats.removeEssentialsCalls += 1;
       tab.removeAttribute("zen-essential");
-      if (unpin) tab.pinned = false;
+      if (unpin) gBrowser.unpinTab(tab);
     },
     onCloseTabShortcut() {},
   };
@@ -646,6 +646,94 @@ test("active markers follow install, uninstall and failed install", async () => 
   );
   assert.equal(failed.document.getElementById("svalinn-menu-style"), null);
   assert.equal(api.closeGuardedWindows(), 0);
+});
+
+test("intentional menu actions are per-tab and per-action", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const essential = env.addTab("https://essential.test", {
+    pinned: true,
+    essential: true,
+  });
+  const another = env.addTab("https://another.test", { pinned: true });
+  const normal = env.addTab("https://normal.test");
+  const doc = env.document;
+  const menu = doc.menu;
+  const unpinItem = doc.getElementById("context_svalinn-unpin");
+  const removeItem = doc.getElementById("context_svalinn-remove-essential");
+
+  const show = (tab, extra = {}) => {
+    Object.assign(env.win.TabContextMenu, {
+      contextTab: tab,
+      contextTabs: [tab],
+      multiselected: false,
+      ...extra,
+    });
+    menu.dispatchEvent({ type: "popupshowing", target: menu });
+  };
+
+  show(pinned);
+  assert.equal(unpinItem.hidden, false);
+  assert.equal(removeItem.hidden, true);
+
+  show(essential);
+  assert.equal(unpinItem.hidden, true);
+  assert.equal(removeItem.hidden, false);
+
+  show(normal);
+  assert.equal(unpinItem.hidden, true);
+  assert.equal(removeItem.hidden, true);
+
+  show(pinned, {
+    contextTabs: [pinned, normal],
+    multiselected: true,
+  });
+  assert.equal(unpinItem.hidden, true);
+  assert.equal(removeItem.hidden, true);
+
+  show(pinned);
+  unpinItem.dispatchEvent({ type: "command" });
+  assert.equal(pinned.pinned, false);
+  assert.equal(env.api.classify(pinned).zone, "normal");
+
+  // No authorization leaks to other tabs or to close.
+  env.win.gBrowser.removeTab(essential);
+  env.win.gBrowser.unpinTab(another);
+  assert.ok(env.tabs.includes(essential));
+  assert.equal(another.pinned, true);
+  env.win.gBrowser.unpinTab(another);
+
+  show(essential);
+  removeItem.dispatchEvent({ type: "command" });
+  assert.equal(essential.hasAttribute("zen-essential"), false);
+  assert.equal(essential.pinned, false);
+  assert.equal(env.api.classify(essential).zone, "normal");
+
+  // Repeated attempt is a no-op, not an authorization.
+  const repeated = env.api.performIntentionalAction(essential, "remove-essential");
+  assert.equal(repeated.status, "not-protected");
+  env.win.gBrowser.removeTab(another);
+  assert.ok(env.tabs.includes(another));
+});
+
+test("failed intentional action clears its authorization", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const other = env.addTab("https://other.test", { pinned: true });
+  const guardedUnpin = env.win.gBrowser.unpinTab;
+  env.win.gBrowser.unpinTab = () => {
+    throw new Error("native unpin failed");
+  };
+
+  const result = env.api.performIntentionalAction(pinned, "unpin");
+  env.win.gBrowser.unpinTab = guardedUnpin;
+
+  assert.equal(result.status, "error");
+  assert.equal(pinned.pinned, true);
+  env.win.gBrowser.unpinTab(other);
+  assert.equal(other.pinned, true);
+  env.win.gBrowser.unpinTab(pinned);
+  assert.ok(env.tabs.includes(pinned));
 });
 
 test("context-menu blocking preserves Zen's native hidden states", async () => {
