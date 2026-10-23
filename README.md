@@ -17,19 +17,26 @@
 
 ## Current status
 
-**Cross-zone duplication implemented and smoke-tested — close prevention not implemented yet.**
+**Close/unpin/removal protection and cross-zone duplication implemented and smoke-tested.**
 
 - `src/policy.mjs`: dependency-free, testable protection rules.
-- `tests/`: policy regression tests plus adapter, capability, drop-guard,
-  bundling, and protocol tests. Run with `npm test`.
-- `src/zen/`: privileged adapter with a cross-zone drop guard and Marionette
-  smoke harness.
+- `tests/`: policy regression tests plus adapter, capability, close-guard,
+  drop-guard, bundling, and protocol tests. Run with `npm test`.
+- `src/zen/`: privileged adapter with close/demotion and cross-zone drop guards,
+  plus a Marionette smoke harness.
 - `userChrome.css`: visual draft; **does not protect against keyboard, drag/drop, or native tab removal**.
 - `assets/icon.svg`: earlier provisional icon, not yet approved as final.
 
 Observed on **Zen 1.23.4b** (TufTux, Arch Linux): `ZenPinnedTabManager.mjs` includes `removeEssentials`, `addToEssentials`, `onCloseTabShortcut`, and `moveToAnotherTabContainerIfNecessary`. Dragging a Pinned to normal invokes `gBrowser.unpinTab`.
 
-Zen Mods are CSS-only. A true guard requires a privileged integration with browser chrome. The adapter now guards the tab strip's drop handler against cross-zone demotion for a single tab in one window:
+Zen Mods are CSS-only. A true guard requires a privileged integration with browser chrome. With Svalinn enabled:
+
+- Close button, middle click, `Ctrl+W`, context-menu close, close-other/selected,
+  unpin, and Remove from Essentials are blocked for protected tabs.
+- Mixed multi-close still closes normal tabs and keeps protected tabs.
+- Normal tabs, unloading, browser quit, window close, and session restore stay
+  native.
+- Cross-zone drag and drop duplicates for a single tab in one window:
 
 | Source | Target | Result |
 | --- | --- | --- |
@@ -38,25 +45,25 @@ Zen Mods are CSS-only. A true guard requires a privileged integration with brows
 | Protected | Same category | Native reorder |
 | Normal | Any category | Native behavior |
 
-The smoke harness validates the transitions in a disposable profile:
+The smoke harness validates these paths in a disposable profile:
 
 ```bash
 npm run zen:smoke
 ```
 
 It launches an isolated profile, injects the adapter, verifies
-normal/Pinned/Essential mapping and all four duplication transitions, checks
-native same-zone/normal-tab behavior, duplication failure safety, unknown-target
-fail-closed behavior, uninstall during a pending restore, restart/session
-restore, then deletes the profile. It never patches `/opt/zen-browser-bin` and
-never uses `~/.zen`. See
-[`docs/zen-integration.md`](docs/zen-integration.md) for the mechanism, security
-model, and rollback steps.
+normal/Pinned/Essential mapping, close/unpin/removal guards, mixed multi-close,
+the Zen close shortcut, unloading, all four duplication transitions, same-zone
+and normal-tab behavior, failure safety, uninstall during a pending restore,
+restart/session restore, then deletes the profile. It never patches
+`/opt/zen-browser-bin` and never uses `~/.zen`. See
+[`docs/zen-integration.md`](docs/zen-integration.md) for the mechanism, manual
+smoke matrix, security model, and rollback steps.
 
 ## Next tasks
 
-1. Build close/unpin/Essential-removal interception; ensure explicit unlock, browser exit and session recovery continue working.
+1. Choose and document a maintainable deployment path for the adapter (the smoke harness is not a user installation), then test in a disposable Zen profile and verify Zen update compatibility before enabling in the main profile.
 2. Extend pre-move duplication to multi-selected, cross-window, folder, tab-group and split-view cases.
-3. Choose and document a maintainable deployment path for the adapter (the smoke harness is not a user installation), then test in a disposable Zen profile and verify Zen update compatibility before enabling in the main profile.
+3. Add explicit temporary unlock and visual controls on top of the policy.
 
 **Safety:** do not patch `/opt/zen-browser-bin` or enable experimental scripts in the daily profile during development.

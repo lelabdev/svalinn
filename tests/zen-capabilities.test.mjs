@@ -19,6 +19,8 @@ function makeScope(overrides = {}) {
       addTab() {},
       duplicateTab() {},
       removeTab() {},
+      removeTabs() {},
+      removeCurrentTab() {},
       moveTabsBefore() {},
       moveTabTo() {},
       tabContainer: { tabDragAndDrop: { handle_drop() {} } },
@@ -77,10 +79,14 @@ test("reports every missing or changed internal method", () => {
   const scope = makeScope();
   delete scope.gZenPinnedTabManager.removeEssentials;
   delete scope.gBrowser.pinTab;
+  delete scope.gBrowser.removeTabs;
+  delete scope.gBrowser.removeCurrentTab;
   const report = probeCapabilities(scope);
   assert.equal(report.ok, false);
   assert.ok(report.missing.includes("gZenPinnedTabManager.removeEssentials"));
   assert.ok(report.missing.includes("gBrowser.pinTab"));
+  assert.ok(report.missing.includes("gBrowser.removeTabs"));
+  assert.ok(report.missing.includes("gBrowser.removeCurrentTab"));
 });
 
 test("fails closed on unverified Zen versions unless explicitly allowed", () => {
