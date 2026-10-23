@@ -1,0 +1,19 @@
+/* Svalinn — Zen Tab Guard: presentation layer only.
+ * Does not protect against keyboard shortcuts or drag and drop.
+ * Install only after reviewing and enabling toolkit.legacyUserProfileCustomizations.stylesheets.
+ */
+.tabbrowser-tab[pinned] .tab-close-button,
+.tabbrowser-tab[zen-essential] .tab-close-button,
+.tabbrowser-tab[pinned] .tab-icon-overlay[closebutton],
+.tabbrowser-tab[zen-essential] .tab-icon-overlay[closebutton] {
+  display: none !important;
+}
+
+/* Prevent removal via the dedicated contextual commands.
+ * The behavioral JavaScript guard must still intercept other removal paths.
+ */
+#context_zen-remove-essential,
+#context_unpinTab,
+#context_unpinSelectedTabs {
+  display: none !important;
+}

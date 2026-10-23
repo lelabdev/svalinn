@@ -1,0 +1,14 @@
+{
+  "name": "svalinn",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Protect pinned and essential tabs in Zen Browser",
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check src/policy.mjs && node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
