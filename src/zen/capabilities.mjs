@@ -10,7 +10,15 @@ import { inspectZenVersion } from "./version.mjs";
 
 /** Internal globals and methods Svalinn depends on. */
 export const REQUIRED_METHODS = Object.freeze({
-  gBrowser: ["pinTab", "unpinTab", "addTab"],
+  gBrowser: [
+    "pinTab",
+    "unpinTab",
+    "addTab",
+    "duplicateTab",
+    "removeTab",
+    "moveTabsBefore",
+    "moveTabTo",
+  ],
   gZenPinnedTabManager: [
     "addToEssentials",
     "removeEssentials",
@@ -99,6 +107,16 @@ export function probeCapabilities(
   const tabs = read(read(scope, "gBrowser"), "tabs");
   if (!tabs || typeof tabs[Symbol.iterator] !== "function") {
     missing.push("gBrowser.tabs");
+  }
+
+  const dropControl = read(
+    read(read(scope, "gBrowser"), "tabContainer"),
+    "tabDragAndDrop"
+  );
+  if (!isObject(dropControl)) {
+    missing.push("gBrowser.tabContainer.tabDragAndDrop");
+  } else if (typeof read(dropControl, "handle_drop") !== "function") {
+    missing.push("gBrowser.tabContainer.tabDragAndDrop.handle_drop");
   }
 
   if (!isObject(read(scope, "gZenPinnedTabManager"))) {

@@ -1,13 +1,14 @@
 # Zen integration and disposable smoke test
 
 Svalinn protects Pinned and Essential tabs inside Zen Browser. This document
-covers the integration groundwork from issue #1: how a privileged script reaches
-Zen's browser chrome, how a disposable profile is used, and how to verify the
-adapter without touching a daily profile or the Zen installation.
+covers the privileged integration: how a script reaches Zen's browser chrome,
+how a disposable profile is used, and how cross-zone drag and drop is duplicated
+without touching a daily profile or the Zen installation.
 
-> Status: **read-only adapter and smoke test only.** Close prevention,
-> copy-on-drop, and visual controls are out of scope for this issue. No
-> destructive hooks are installed yet.
+> Status: **cross-zone duplication for a single tab in one window is implemented
+> and smoke-tested.** Same-category reordering and normal-tab dragging stay
+> native. Close prevention, multi-selection, cross-window moves, folders, and
+> split views remain out of scope.
 
 ## Verified environment
 
@@ -80,13 +81,18 @@ What happens:
 5. One normal, one Pinned, and one Essential tab are created through Zen's own
    APIs.
 6. The adapter maps the tabs back to `normal` / `pinned` / `essential`.
-7. Install, re-install, uninstall, and disabled mode are checked against a tab
-   fingerprint to prove tabs were not changed.
-8. A second window is opened to verify the `domwindowopened` observer attaches
-   the adapter without touching tabs.
-9. Zen restarts on the same profile and the three tabs must restore with their
-   zones intact.
-10. Zen shuts down, and the temporary profile is removed.
+7. Synthetic drops verify all four cross-zone transitions create exactly one
+   copy, keep the source protected, and select the copy.
+8. Same-zone reordering and normal-tab drops are checked to stay native.
+9. Duplication failure and a protected `about:config` tab are checked to leave
+   the source intact.
+10. Install, re-install, uninstall, and disabled mode are checked against a tab
+    fingerprint to prove tabs were not changed.
+11. A second window is opened to verify the `domwindowopened` observer and drop hook
+    attach to it without touching tabs.
+12. Zen restarts on the same profile and the original tabs must restore with
+    their zones intact, with the drop guard reattached.
+13. Zen shuts down, and the temporary profile is removed.
 
 Useful flags:
 
@@ -113,6 +119,49 @@ The profile is rejected if it is `~/.zen` or inside it. If the requested
 Marionette port is already used by another Zen, the `moz:profile` check aborts
 the run before any privileged script executes.
 
+## Cross-zone duplication
+
+Issue #2 makes a protected tab a permanent shortcut. Dragging a Pinned or
+Essential tab into another category creates one copy in the destination and
+leaves the source in place.
+
+| Source | Target | Result |
+| --- | --- | --- |
+| Essential | Normal | Duplicate as Normal; source stays Essential |
+| Essential | Pinned | Duplicate as Pinned; source stays Essential |
+| Pinned | Normal | Duplicate as Normal; source stays Pinned |
+| Pinned | Essential | Duplicate as Essential; source stays Pinned |
+| Essential / Pinned | Same category | Native reorder |
+| Normal | Any category | Native behavior |
+
+How it works:
+
+1. On install, Svalinn replaces `gBrowser.tabContainer.tabDragAndDrop.handle_drop`
+   for each browser window with a guarded wrapper.
+2. A wrapper is only engaged for a same-window, single-tab `move` drop where the
+   source is protected and the target section is a different zone.
+3. The native drop handler is skipped, so Zen never calls `removeEssentials` or
+   `gBrowser.unpinTab` on the protected source.
+4. The tab is duplicated, then its zone is applied **after** the
+   `SSTabRestored` event. This is important: duplicated tabs are restored
+   asynchronously and can overwrite an early category change. A nonempty tab id
+   is deliberately not treated as proof of restoration.
+5. Pending duplication operations are tracked per window. `uninstall()`,
+   `setEnabled(false)`, and window detach cancel the restore listener/timer and
+   remove any not-yet-finalized copy without touching the source.
+6. The copy is positioned and selected. If duplication, category application, or
+   restore fails or times out, the copy is removed and the source is left
+   untouched.
+7. If a protected same-window single-tab drop has an unknown target or a
+   planning error, the drop is consumed and the source is preserved. Zen's
+   native demotion handler is not called.
+8. Same-zone reordering, normal tabs, multi-selected tabs, and cross-window drags
+   fall through to Zen's native handler.
+
+The guard is restored on `Svalinn.uninstall()` or when the browser exits.
+Multi-selection, cross-window moves, folders, split views, and group labels are
+intentionally left native for follow-up work.
+
 ## Install and uninstall model
 
 There is intentionally no persistent installation for this phase.
@@ -120,12 +169,12 @@ There is intentionally no persistent installation for this phase.
 - **Install:** run the smoke command. The adapter is evaluated in the running
   browser's chrome context and attaches a non-enumerable `__svalinn` marker to
   each browser window. `Svalinn.install({ enabled: true })` waits for Zen
-  startup, validates capabilities, then attaches every window and observes new
-  ones.
-- **Uninstall:** `Svalinn.uninstall()` removes the marker and the window
-  observer. Quitting Zen removes everything else; the disposable profile can be
-  deleted. There is no prior state to restore in Zen's installation directory or
-  daily profile.
+  startup, validates capabilities, then attaches every window, installs the drop
+  guard, and observes new windows.
+- **Uninstall:** `Svalinn.uninstall()` restores each window's native
+  `handle_drop`, removes the marker, and removes the window observer. Quitting
+  Zen removes everything else; the disposable profile can be deleted. There is
+  no prior state to restore in Zen's installation directory or daily profile.
 
 The adapter is disabled by default (`svalinn.enabled = false`). The smoke test
 passes `enabled: true` explicitly. A disabled call returns
@@ -141,8 +190,11 @@ await Svalinn.install({ enabled: true, waitForStartup: true, timeoutMs: 30000 })
 // { status: "installed" | "unsupported" | "disabled" | "not-ready" | "already-installed", ... }
 
 Svalinn.snapshot();
-// { adapter, installed, enabled, windows: [{ ready, hasManager, tabCount, tabs }] }
+// { adapter, installed, enabled, warnings, pending,
+//   windows: [{ ready, hasManager, hooked, tabCount, tabs }] }
 
+Svalinn.hookedWindows(); // number of windows with the drop guard installed
+Svalinn.pendingDuplications(); // restore operations waiting for SSTabRestored
 Svalinn.uninstall(); // { status: "uninstalled", changedTabs: false }
 Svalinn.classify(tab); // { zone: "essential" | "pinned" | "normal", ... }
 ```
@@ -199,17 +251,35 @@ npm run zen:smoke
   unverified versions
 - adapter behaviour in a VM: opt-in/disabled mode, idempotent install, clean
   uninstall, startup timeouts, multi-window snapshots and observer attachment,
-  and no tab mutation
+  cross-zone duplication, native reordering, event-driven lazy SessionStore
+  restoration (including a nonempty-id false signal), restore timeout, unknown
+  and throwing targets, planning errors, uninstall cancellation, duplication
+  failures, Essential rejection, and no source-tab mutation
 - injection bundling and Marionette framing/error handling
 
-`npm run zen:smoke` is the integration check against a real Zen process. It is
-not part of `npm test` because it launches a browser.
+`npm run zen:smoke` is the integration check against a real Zen process. It
+covers startup, capability probing, install/uninstall, all four cross-zone
+transitions, same-zone and normal-tab dragging, deletion-safe failure paths,
+`about:config` duplication, an unknown-target negative control, delayed-restore
+cancellation by uninstall, reinstall after cancellation, multi-window
+attachment, restart/session restore, and shutdown. It is not part of `npm test`
+because it launches a browser.
 
 ## Known limitations
 
 - The adapter is a development/smoke harness, not a user-facing installation
   method. A future issue must choose and document a supported deployment path.
-- No close, unpin, Essential-removal, or drag/drop interception exists yet.
+- Close, unpin, and Essential-removal interception is not implemented yet.
+- Cross-zone duplication is limited to a single tab in one window. Multi-selected
+  tabs, cross-window drags, folders, tab groups, and split views stay native.
+- Duplication waits for the SessionStore `SSTabRestored` event (bounded to 10
+  seconds). If restoration does not complete, the copy is removed and the source
+  is kept. Uninstalling cancels pending restoration work and removes unfinished
+  copies.
+- Protected drops with an unknown target or an unsafe planning result are
+  consumed rather than delegated to Zen's native demotion path.
+- The copy preserves the current URL and container, but not full back/forward
+  history.
 - The smoke test creates local `file://` tabs; session restore is verified for
   that shape only.
 - A future Zen release may change internal APIs. The expected outcome is a clean
