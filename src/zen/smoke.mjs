@@ -279,7 +279,7 @@ function zenArgs({ profile, port, headless }) {
   ];
 }
 
-async function connectAndVerify({ client, profile, child }) {
+async function connectAndVerify({ client, profile, port, child }) {
   const session = await client.newSession();
   const capabilities = session?.capabilities ?? {};
   const remoteProfile = capabilities["moz:profile"];
@@ -549,6 +549,7 @@ export async function runSmoke(options) {
       const session = await connectAndVerify({
         client,
         profile: profileInfo.profile,
+        port: options.port,
         child: processHandle.child,
       });
       verified = true;
@@ -650,28 +651,59 @@ export async function runSmoke(options) {
     );
 
     phase = "multi-window";
+    const enabledForWindows = await runAdapter(
+      client,
+      `return await api.install({ enabled: true });`
+    );
+    const beforeMultiWindow = fingerprint(
+      await runAdapter(client, `return api.snapshot();`)
+    );
     const multi = await runScript(
       client,
       `
 const win = [...Services.wm.getEnumerator("navigator:browser")][0];
 const second = win.OpenBrowserWindow();
 await new Promise(resolve => second.addEventListener("load", resolve, { once: true }));
-await new Promise(resolve => setTimeout(resolve, 500));
+const deadline = Date.now() + 5000;
+while (!second.__svalinn && Date.now() < deadline) {
+  await new Promise(resolve => setTimeout(resolve, 100));
+}
 const attached = Boolean(second.__svalinn);
-const windows = [...Services.wm.getEnumerator("navigator:browser")].length;
+const sameInstance = second.__svalinn === globalThis.Svalinn;
+const firstAttached = Boolean(win.__svalinn);
+const snapshot = globalThis.Svalinn.snapshot();
+const windows = snapshot.windows.length;
+const windowsWithManager = snapshot.windows.filter(window => window.hasManager).length;
 second.close();
 await new Promise(resolve => setTimeout(resolve, 500));
 return {
   attached,
+  sameInstance,
+  firstAttached,
   windows,
+  windowsWithManager,
   remaining: [...Services.wm.getEnumerator("navigator:browser")].length,
 };`,
       { timeoutMs: 20_000 }
     );
+    const afterMultiWindow = fingerprint(
+      await runAdapter(client, `return api.snapshot();`)
+    );
     record(
       "multi-window-observer",
-      multi.windows >= 2 && multi.remaining >= 1,
-      multi
+      enabledForWindows.status === "installed" &&
+        multi.attached === true &&
+        multi.sameInstance === true &&
+        multi.firstAttached === true &&
+        multi.windows >= 2 &&
+        multi.windowsWithManager >= 2 &&
+        multi.remaining >= 1 &&
+        afterMultiWindow === beforeMultiWindow,
+      {
+        installStatus: enabledForWindows.status,
+        ...multi,
+        tabsChanged: afterMultiWindow !== beforeMultiWindow,
+      }
     );
 
     if (!options.skipRestart) {
