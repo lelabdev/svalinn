@@ -29,7 +29,7 @@
     pending: new Set(),
     restoredTabs: new WeakSet(),
     restoreTimeoutMs: 10_000,
-    bypass: 0,
+    authorization: null,
   };
 
   function browserWindows() {
@@ -230,28 +230,32 @@
     const gBrowser = win.gBrowser;
     const manager = win.gZenPinnedTabManager;
 
-    withBypass(() => {
-      if (targetZone === ZONES.NORMAL) {
-        if (copy.hasAttribute("zen-essential")) {
+    if (targetZone === ZONES.NORMAL) {
+      if (copy.hasAttribute("zen-essential")) {
+        withAuthorization(copy, ["remove-essential", "unpin"], () => {
           manager.removeEssentials(copy);
-        } else if (copy.pinned) {
+        });
+      } else if (copy.pinned) {
+        withAuthorization(copy, ["unpin"], () => {
           gBrowser.unpinTab(copy);
-        }
-      } else if (targetZone === ZONES.PINNED) {
-        if (copy.hasAttribute("zen-essential")) {
+        });
+      }
+    } else if (targetZone === ZONES.PINNED) {
+      if (copy.hasAttribute("zen-essential")) {
+        withAuthorization(copy, ["remove-essential"], () => {
           manager.removeEssentials(copy, false);
-        } else if (!copy.pinned) {
-          gBrowser.pinTab(copy);
-        }
-      } else if (targetZone === ZONES.ESSENTIAL) {
-        if (!copy.hasAttribute("zen-essential")) {
-          const added = manager.addToEssentials(copy);
-          if (added === false) {
-            throw new Error("addToEssentials rejected the duplicated tab");
-          }
+        });
+      } else if (!copy.pinned) {
+        gBrowser.pinTab(copy);
+      }
+    } else if (targetZone === ZONES.ESSENTIAL) {
+      if (!copy.hasAttribute("zen-essential")) {
+        const added = manager.addToEssentials(copy);
+        if (added === false) {
+          throw new Error("addToEssentials rejected the duplicated tab");
         }
       }
-    });
+    }
 
     const actual = zoneOf(readTabFlags(copy));
     if (actual !== targetZone) {
@@ -264,7 +268,7 @@
     op.removed = true;
     try {
       if (op.copy?.isConnected !== false) {
-        withBypass(() => {
+        withAuthorization(op.copy, ["close"], () => {
           op.win?.gBrowser?.removeTab?.(op.copy, { animate: false });
         });
       }
@@ -497,17 +501,7 @@
     }
   }
 
-  function withBypass(callback) {
-    state.bypass += 1;
-    try {
-      return callback();
-    } finally {
-      state.bypass -= 1;
-    }
-  }
-
   function guardActive(win) {
-    if (state.bypass > 0) return false;
     if (!win || win.closed === true) return false;
     if (win.gZenStartup?.isReady !== true) return false;
     try {
@@ -523,8 +517,24 @@
     return true;
   }
 
+  function authorizedFor(tab, action) {
+    const auth = state.authorization;
+    return Boolean(auth && auth.tab === tab && auth.actions.has(action));
+  }
+
+  function withAuthorization(tab, actions, callback) {
+    const previous = state.authorization;
+    state.authorization = { tab, actions: new Set(actions) };
+    try {
+      return callback();
+    } finally {
+      state.authorization = previous;
+    }
+  }
+
   function canPerform(win, tab, action) {
     if (!guardActive(win) || !tab || tab.closing === true) return true;
+    if (authorizedFor(tab, action)) return true;
     return (
       decideAction({
         tab: readTabFlags(tab),
@@ -541,6 +551,58 @@
     return contextTab.multiselected
       ? [...win.gBrowser.selectedTabs]
       : [contextTab];
+  }
+
+  function performIntentionalAction(tab, action) {
+    if (!state.installed || !state.enabled) {
+      return { status: "disabled" };
+    }
+    const win = tab?.documentGlobal ?? browserWindows()[0];
+    if (!win || !tab) return { status: "missing-tab" };
+
+    const flags = readTabFlags(tab);
+    if (!isProtected(flags)) return { status: "not-protected" };
+    if (action === "unpin" && (!flags.pinned || flags.essential)) {
+      return { status: "wrong-zone" };
+    }
+    if (action === "remove-essential" && !flags.essential) {
+      return { status: "wrong-zone" };
+    }
+    if (action !== "unpin" && action !== "remove-essential") {
+      return { status: "unsupported-action" };
+    }
+
+    try {
+      if (action === "unpin") {
+        withAuthorization(tab, ["unpin"], () => {
+          win.gBrowser.unpinTab(tab);
+        });
+      } else {
+        withAuthorization(
+          tab,
+          ["remove-essential", "unpin"],
+          () => {
+            win.gZenPinnedTabManager.removeEssentials(tab);
+          }
+        );
+      }
+    } catch (error) {
+      state.warnings.push(`intentional-action:${action}:${error}`);
+      return {
+        status: "error",
+        error: String(error),
+        zone: zoneOf(readTabFlags(tab)),
+      };
+    }
+
+    const zone = zoneOf(readTabFlags(tab));
+    if (zone !== "normal") {
+      return { status: "unchanged", zone };
+    }
+    return {
+      status: action === "unpin" ? "unpinned" : "removed-essential",
+      zone,
+    };
   }
 
   function warnBlocked(action, tabs) {
@@ -677,6 +739,8 @@
     "context_unpinSelectedTabs",
     "context_zen-remove-essential",
   ]);
+  const UNPIN_ITEM_ID = "context_svalinn-unpin";
+  const REMOVE_ITEM_ID = "context_svalinn-remove-essential";
 
   function updateContextMenu(win) {
     const doc = win?.document;
@@ -686,18 +750,61 @@
       doc.getElementById(id)?.removeAttribute(MENU_BLOCK_ATTR);
     }
 
-    const tab = win?.TabContextMenu?.contextTab;
-    if (!tab || !isProtected(readTabFlags(tab))) return;
+    const contextTab = win?.TabContextMenu?.contextTab;
+    const contextTabs = win?.TabContextMenu?.contextTabs ?? [];
+    const multiselected =
+      Boolean(win?.TabContextMenu?.multiselected) || contextTabs.length > 1;
+    const flags = contextTab ? readTabFlags(contextTab) : null;
+    const protectedContext = Boolean(flags && isProtected(flags));
+    const protectedSelected = contextTabs.some(tab =>
+      isProtected(readTabFlags(tab))
+    );
 
-    for (const id of MANAGED_MENU_ITEMS) {
-      doc.getElementById(id)?.setAttribute(MENU_BLOCK_ATTR, "true");
+    const unpinItem = doc.getElementById(UNPIN_ITEM_ID);
+    const removeItem = doc.getElementById(REMOVE_ITEM_ID);
+    if (unpinItem) {
+      unpinItem.hidden = !(
+        !multiselected &&
+        flags &&
+        flags.pinned &&
+        !flags.essential
+      );
+    }
+    if (removeItem) {
+      removeItem.hidden = !(!multiselected && flags?.essential);
+    }
+
+    if (!protectedContext && !protectedSelected) return;
+
+    if (protectedContext) {
+      doc.getElementById("context_closeTab")?.setAttribute(
+        MENU_BLOCK_ATTR,
+        "true"
+      );
+    }
+    if (protectedContext && flags?.pinned) {
+      doc.getElementById("context_unpinTab")?.setAttribute(
+        MENU_BLOCK_ATTR,
+        "true"
+      );
+    }
+    if (protectedSelected) {
+      doc.getElementById("context_unpinSelectedTabs")?.setAttribute(
+        MENU_BLOCK_ATTR,
+        "true"
+      );
+    }
+    if (protectedContext && flags?.essential) {
+      doc.getElementById("context_zen-remove-essential")?.setAttribute(
+        MENU_BLOCK_ATTR,
+        "true"
+      );
     }
   }
 
   /**
-   * Keep destructive menu commands visually unavailable while locked without
-   * mutating Zen's own hidden/disabled state. An attribute plus a small style
-   * rule only adds Svalinn's restriction; native menu state remains authoritative.
+   * Add explicit per-tab unpin/remove commands and keep destructive native
+   * commands visually unavailable without mutating Zen's hidden/disabled state.
    */
   function installContextMenuHook(win) {
     const doc = win?.document;
@@ -714,13 +821,65 @@
       doc.documentElement.appendChild(style);
     }
 
+    const makeItem = (id, label) => {
+      let item = doc.getElementById(id);
+      if (!item) {
+        item = doc.createXULElement
+          ? doc.createXULElement("menuitem")
+          : doc.createElement("menuitem");
+        item.id = id;
+        item.setAttribute("label", label);
+        item.setAttribute("hidden", "true");
+        const anchor =
+          doc.getElementById("context_zen-remove-essential") ??
+          doc.getElementById("context_pinTab");
+        if (anchor?.after) anchor.after(item);
+        else menu.appendChild(item);
+      }
+      return item;
+    };
+
+    const unpinItem = makeItem(UNPIN_ITEM_ID, "Unpin This Pinned Tab");
+    const removeItem = makeItem(
+      REMOVE_ITEM_ID,
+      "Remove This Tab from Essentials"
+    );
+    const onUnpin = () => {
+      performIntentionalAction(win.TabContextMenu?.contextTab, "unpin");
+      try {
+        menu.hidePopup?.();
+      } catch {
+        // Menu may already be closed.
+      }
+    };
+    const onRemove = () => {
+      performIntentionalAction(
+        win.TabContextMenu?.contextTab,
+        "remove-essential"
+      );
+      try {
+        menu.hidePopup?.();
+      } catch {
+        // Menu may already be closed.
+      }
+    };
     const onShowing = event => {
       if (event?.target?.id === "tabContextMenu") updateContextMenu(win);
     };
+
+    unpinItem.addEventListener("command", onUnpin);
+    removeItem.addEventListener("command", onRemove);
     menu.addEventListener("popupshowing", onShowing);
 
     Object.defineProperty(menu, CONTEXT_HOOK, {
-      value: { style, onShowing },
+      value: {
+        style,
+        unpinItem,
+        removeItem,
+        onUnpin,
+        onRemove,
+        onShowing,
+      },
       configurable: true,
       writable: false,
       enumerable: false,
@@ -735,6 +894,10 @@
     if (!hook) return;
     try {
       menu.removeEventListener("popupshowing", hook.onShowing);
+      hook.unpinItem?.removeEventListener("command", hook.onUnpin);
+      hook.removeItem?.removeEventListener("command", hook.onRemove);
+      hook.unpinItem?.remove();
+      hook.removeItem?.remove();
       for (const id of MANAGED_MENU_ITEMS) {
         doc.getElementById(id)?.removeAttribute(MENU_BLOCK_ATTR);
       }
@@ -936,6 +1099,7 @@
   }
 
   function uninstall() {
+    state.authorization = null;
     cancelAllPending("uninstall");
     removeWindowObserver();
     for (const win of [...state.windows]) detachWindow(win);
@@ -1000,6 +1164,7 @@
     hookedWindows,
     closeGuardedWindows,
     pendingDuplications,
+    performIntentionalAction,
     classify,
     policy: {
       ZONES,

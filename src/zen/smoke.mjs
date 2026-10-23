@@ -848,6 +848,13 @@ const closeDisplay = tab => {
   const button = tab.querySelector(".tab-close-button");
   return button ? win.getComputedStyle(button).display : null;
 };
+const tabsInclude = tab => [...gBrowser.tabs].includes(tab);
+const zone = tab =>
+  tab.hasAttribute("zen-essential")
+    ? "essential"
+    : tab.pinned
+      ? "pinned"
+      : "normal";
 const principal = Services.scriptSecurityManager.getSystemPrincipal();
 const base = ${JSON.stringify(urls.normal)};
 let seq = 0;
@@ -989,6 +996,110 @@ check(
   "context-menu-style-present",
   Boolean(doc.getElementById("svalinn-menu-style")),
   { style: Boolean(doc.getElementById("svalinn-menu-style")) }
+);
+
+const unpinItem = doc.getElementById("context_svalinn-unpin");
+const removeItem = doc.getElementById("context_svalinn-remove-essential");
+const intentPinned = await makeTab({ pinned: true });
+const intentEssential = await makeTab({ essential: true });
+const intentOther = await makeTab({ pinned: true });
+const intentNormal = await makeTab();
+
+await showMenuFor(intentPinned);
+check(
+  "intent-menu-pinned",
+  unpinItem.hidden === false &&
+    removeItem.hidden === true &&
+    blocked("context_unpinTab"),
+  {
+    unpinVisible: !unpinItem.hidden,
+    removeVisible: !removeItem.hidden,
+    nativeUnpinBlocked: blocked("context_unpinTab"),
+  }
+);
+unpinItem.dispatchEvent(new win.Event("command", { bubbles: true }));
+await wait(350);
+check(
+  "intent-unpin-action",
+  intentPinned.pinned === false && zone(intentPinned) === "normal",
+  { pinned: intentPinned.pinned, zone: zone(intentPinned) }
+);
+
+await showMenuFor(intentEssential);
+check(
+  "intent-menu-essential",
+  removeItem.hidden === false &&
+    unpinItem.hidden === true &&
+    blocked("context_zen-remove-essential"),
+  {
+    removeVisible: !removeItem.hidden,
+    unpinVisible: !unpinItem.hidden,
+    nativeRemoveBlocked: blocked("context_zen-remove-essential"),
+  }
+);
+removeItem.dispatchEvent(new win.Event("command", { bubbles: true }));
+await wait(350);
+check(
+  "intent-remove-essential-action",
+  intentEssential.hasAttribute("zen-essential") === false &&
+    intentEssential.pinned === false &&
+    zone(intentEssential) === "normal",
+  {
+    essential: intentEssential.hasAttribute("zen-essential"),
+    pinned: intentEssential.pinned,
+    zone: zone(intentEssential),
+  }
+);
+
+gBrowser.removeTab(intentOther);
+gBrowser.unpinTab(intentOther);
+check(
+  "intent-authorization-cleared",
+  tabsInclude(intentOther) &&
+    intentOther.pinned === true &&
+    intentOther.hasAttribute("zen-essential") === false,
+  {
+    present: tabsInclude(intentOther),
+    pinned: intentOther.pinned,
+    zone: zone(intentOther),
+  }
+);
+
+gBrowser.selectedTab = intentOther;
+gBrowser.addToMultiSelectedTabs(intentOther);
+gBrowser.addToMultiSelectedTabs(intentNormal);
+win.TabContextMenu.contextTab = intentOther;
+win.TabContextMenu.updateContextMenu(menu);
+menu.dispatchEvent(new win.Event("popupshowing", { bubbles: true }));
+await wait(50);
+check(
+  "intent-menu-multiselected",
+  unpinItem.hidden === true &&
+    removeItem.hidden === true &&
+    blocked("context_unpinSelectedTabs"),
+  {
+    unpinVisible: !unpinItem.hidden,
+    removeVisible: !removeItem.hidden,
+    nativeUnpinSelectedBlocked: blocked("context_unpinSelectedTabs"),
+  }
+);
+gBrowser.clearMultiSelectedTabs();
+
+await showMenuFor(folderTab);
+check(
+  "intent-menu-folder",
+  unpinItem.hidden === false && removeItem.hidden === true,
+  {
+    unpinVisible: !unpinItem.hidden,
+    removeVisible: !removeItem.hidden,
+  }
+);
+unpinItem.dispatchEvent(new win.Event("command", { bubbles: true }));
+await wait(350);
+check(
+  "intent-folder-unpin",
+  folderTab.pinned === false && zone(folderTab) === "normal",
+  { pinned: folderTab.pinned, zone: zone(folderTab) }
 );
 
 return {
