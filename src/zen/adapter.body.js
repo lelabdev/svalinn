@@ -10,10 +10,13 @@
 (() => {
   "use strict";
 
-  const ADAPTER_VERSION = "0.3.0";
+  const ADAPTER_VERSION = "0.4.0";
   const MARKER = "__svalinn";
   const DROP_HOOK = "__svalinnDropHook";
   const CLOSE_HOOK = "__svalinnCloseHook";
+  const CONTEXT_HOOK = "__svalinnContextHook";
+  const ACTIVE_ATTR = "svalinn-active";
+  const MENU_BLOCK_ATTR = "svalinn-blocked";
   const ENABLED_PREF = "svalinn.enabled";
 
   const state = {
@@ -186,7 +189,9 @@
         sameWindow: true,
         locked: true,
       });
-      if (decision === "native") return { action: "native" };
+      if (decision === "native") {
+        return { action: "native", source };
+      }
       if (decision !== "duplicate") {
         return {
           action: "block",
@@ -518,14 +523,14 @@
     return true;
   }
 
-  function shouldBlock(win, tab, action) {
-    if (!guardActive(win) || !tab || tab.closing === true) return false;
+  function canPerform(win, tab, action) {
+    if (!guardActive(win) || !tab || tab.closing === true) return true;
     return (
       decideAction({
         tab: readTabFlags(tab),
         action,
         locked: true,
-      }) === "block"
+      }) !== "block"
     );
   }
 
@@ -574,7 +579,7 @@
     };
 
     gBrowser.removeTab = function (tab, options) {
-      if (shouldBlock(win, tab, "close")) {
+      if (!canPerform(win, tab, "close")) {
         warnBlocked("close", tab);
         return undefined;
       }
@@ -583,7 +588,7 @@
 
     gBrowser.removeTabs = function (tabs, options) {
       const list = Array.from(tabs ?? []);
-      const allowed = list.filter(tab => !shouldBlock(win, tab, "close"));
+      const allowed = list.filter(tab => canPerform(win, tab, "close"));
       if (allowed.length === list.length) {
         return originals.removeTabs.call(this, tabs, options);
       }
@@ -597,7 +602,7 @@
 
     gBrowser.removeCurrentTab = function (options) {
       const tab = this.selectedTab;
-      if (shouldBlock(win, tab, "close")) {
+      if (!canPerform(win, tab, "close")) {
         warnBlocked("close", tab);
         return undefined;
       }
@@ -605,7 +610,7 @@
     };
 
     gBrowser.unpinTab = function (tab, options) {
-      if (shouldBlock(win, tab, "unpin")) {
+      if (!canPerform(win, tab, "unpin")) {
         warnBlocked("unpin", tab);
         return undefined;
       }
@@ -614,8 +619,8 @@
 
     manager.removeEssentials = function (tab, unpin = true) {
       const targets = resolveEssentialsTargets(win, tab);
-      const blocked = targets.filter(targetTab =>
-        shouldBlock(win, targetTab, "remove-essential")
+      const blocked = targets.filter(
+        targetTab => !canPerform(win, targetTab, "remove-essential")
       );
       if (blocked.length) {
         warnBlocked("remove-essential", blocked);
@@ -627,7 +632,9 @@
     if (originals.removeTabGroup) {
       gBrowser.removeTabGroup = function (group, options) {
         const tabs = Array.from(group?.tabs ?? []);
-        const blocked = tabs.filter(tab => shouldBlock(win, tab, "close"));
+        const blocked = tabs.filter(
+          tab => !canPerform(win, tab, "close")
+        );
         if (blocked.length) {
           warnBlocked("close-group", blocked);
           return Promise.resolve();
@@ -664,6 +671,91 @@
     }
   }
 
+  const MANAGED_MENU_ITEMS = Object.freeze([
+    "context_closeTab",
+    "context_unpinTab",
+    "context_unpinSelectedTabs",
+    "context_zen-remove-essential",
+  ]);
+
+  function updateContextMenu(win) {
+    const doc = win?.document;
+    if (!doc) return;
+
+    for (const id of MANAGED_MENU_ITEMS) {
+      doc.getElementById(id)?.removeAttribute(MENU_BLOCK_ATTR);
+    }
+
+    const tab = win?.TabContextMenu?.contextTab;
+    if (!tab || !isProtected(readTabFlags(tab))) return;
+
+    for (const id of MANAGED_MENU_ITEMS) {
+      doc.getElementById(id)?.setAttribute(MENU_BLOCK_ATTR, "true");
+    }
+  }
+
+  /**
+   * Keep destructive menu commands visually unavailable while locked without
+   * mutating Zen's own hidden/disabled state. An attribute plus a small style
+   * rule only adds Svalinn's restriction; native menu state remains authoritative.
+   */
+  function installContextMenuHook(win) {
+    const doc = win?.document;
+    const menu = doc?.getElementById?.("tabContextMenu");
+    if (!doc || !menu) return false;
+    if (menu[CONTEXT_HOOK]) return true;
+
+    let style = doc.getElementById("svalinn-menu-style");
+    if (!style) {
+      style = doc.createElement("style");
+      style.id = "svalinn-menu-style";
+      style.textContent =
+        '#tabContextMenu [svalinn-blocked="true"] { display: none !important; }';
+      doc.documentElement.appendChild(style);
+    }
+
+    const onShowing = event => {
+      if (event?.target?.id === "tabContextMenu") updateContextMenu(win);
+    };
+    menu.addEventListener("popupshowing", onShowing);
+
+    Object.defineProperty(menu, CONTEXT_HOOK, {
+      value: { style, onShowing },
+      configurable: true,
+      writable: false,
+      enumerable: false,
+    });
+    return true;
+  }
+
+  function removeContextMenuHook(win) {
+    const doc = win?.document;
+    const menu = doc?.getElementById?.("tabContextMenu");
+    const hook = menu?.[CONTEXT_HOOK];
+    if (!hook) return;
+    try {
+      menu.removeEventListener("popupshowing", hook.onShowing);
+      for (const id of MANAGED_MENU_ITEMS) {
+        doc.getElementById(id)?.removeAttribute(MENU_BLOCK_ATTR);
+      }
+      hook.style?.remove();
+      delete menu[CONTEXT_HOOK];
+    } catch (error) {
+      state.warnings.push(`context-menu-unhook: ${error}`);
+    }
+  }
+
+  function setActiveMarker(win, active) {
+    try {
+      win?.document?.documentElement?.toggleAttribute?.(
+        ACTIVE_ATTR,
+        Boolean(active)
+      );
+    } catch (error) {
+      state.warnings.push(`active-marker: ${error}`);
+    }
+  }
+
   function attachWindow(win) {
     if (!win || win.closed) return false;
     if (!installDropHook(win)) {
@@ -674,6 +766,9 @@
       state.warnings.push("close-hook-unavailable");
       removeDropHook(win);
       return false;
+    }
+    if (!installContextMenuHook(win)) {
+      state.warnings.push("context-menu-unavailable");
     }
     try {
       Object.defineProperty(win, MARKER, {
@@ -687,16 +782,20 @@
         win[MARKER] = api;
       } catch (error) {
         state.warnings.push(`window-attach: ${error}`);
+        removeContextMenuHook(win);
         removeCloseHook(win);
         removeDropHook(win);
         return false;
       }
     }
     state.windows.add(win);
+    setActiveMarker(win, true);
     return true;
   }
 
   function detachWindow(win) {
+    setActiveMarker(win, false);
+    removeContextMenuHook(win);
     removeCloseHook(win);
     removeDropHook(win);
     try {

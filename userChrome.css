@@ -1,19 +1,27 @@
-/* Svalinn — Zen Tab Guard: presentation layer only.
- * Does not protect against keyboard shortcuts or drag and drop.
- * Install only after reviewing and enabling toolkit.legacyUserProfileCustomizations.stylesheets.
+/* Svalinn — Zen Tab Guard: presentation layer.
+ *
+ * Close-affordance hiding is scoped to windows where the behavioral guards are
+ * actually installed (`:root[svalinn-active]`). If the adapter is absent, fails
+ * to install, or is uninstalled/disabled, the marker is removed and Zen's
+ * native close controls return.
+ *
+ * CSS cannot block keyboard shortcuts, middle click, drag/drop, or native tab
+ * removal. The privileged behavioral guard is the security boundary.
+ *
+ * Requires toolkit.legacyUserProfileCustomizations.stylesheets = true.
+ * Normal tabs are not matched by the selectors below.
  */
-.tabbrowser-tab[pinned] .tab-close-button,
-.tabbrowser-tab[zen-essential] .tab-close-button,
-.tabbrowser-tab[pinned] .tab-icon-overlay[closebutton],
-.tabbrowser-tab[zen-essential] .tab-icon-overlay[closebutton] {
+:root[svalinn-active] .tabbrowser-tab[pinned] .tab-close-button,
+:root[svalinn-active] .tabbrowser-tab[zen-essential] .tab-close-button,
+:root[svalinn-active] .tabbrowser-tab[pinned] .close-icon,
+:root[svalinn-active] .tabbrowser-tab[zen-essential] .close-icon,
+:root[svalinn-active] .tabbrowser-tab[pinned] .tab-icon-overlay[closebutton],
+:root[svalinn-active] .tabbrowser-tab[zen-essential] .tab-icon-overlay[closebutton] {
   display: none !important;
 }
 
-/* Prevent removal via the dedicated contextual commands.
- * The behavioral JavaScript guard must still intercept other removal paths.
+/* Destructive context-menu entries are restricted by the adapter with a
+ * `svalinn-blocked` attribute, not by mutating Zen's hidden/disabled state.
+ * That keeps Zen's native menu ownership intact and still lets normal tabs keep
+ * their normal controls.
  */
-#context_zen-remove-essential,
-#context_unpinTab,
-#context_unpinSelectedTabs {
-  display: none !important;
-}

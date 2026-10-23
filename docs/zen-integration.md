@@ -6,10 +6,12 @@ how a disposable profile is used, how close/unpin removal is blocked, and how
 cross-zone drag and drop is duplicated without touching a daily profile or the
 Zen installation.
 
-> Status: **close/unpin/remove protection and cross-zone duplication are
-> implemented and smoke-tested.** Normal tabs, unloading, browsing, browser quit,
-> and session restore stay native. Multi-selection, cross-window moves, folders,
-> and split views remain out of scope for drag and drop.
+> Status: **close/unpin/remove protection, cross-zone duplication, and
+> lifecycle-safe close-affordance/menu hiding are implemented and smoke-tested.**
+> Intentional removal/unlock UX is deliberately deferred by issue #4. Normal tabs,
+> unloading, browsing, browser quit, and session restore stay native.
+> Multi-selection, cross-window moves, folders, and split views remain out of scope
+> for drag and drop.
 
 ## Verified environment
 
@@ -75,28 +77,34 @@ npm run zen:smoke
 
 What happens:
 
-1. A profile is created with `mkdtemp()` under the system temp directory.
+1. A profile is created with `mkdtemp()` under the system temp directory, with
+   `userChrome.css` copied into its `chrome/` directory.
 2. Zen launches with Marionette, a unique profile, and `--no-remote`.
 3. The harness verifies `moz:profile` before executing any chrome script.
-4. The adapter bundle is evaluated in the chrome context.
-5. One normal, one Pinned, and one Essential tab are created through Zen's own
+4. Before install, protected-tab CSS is verified to be inert (no active marker).
+5. The adapter bundle is evaluated in the chrome context.
+6. One normal, one Pinned, and one Essential tab are created through Zen's own
    APIs.
-6. The adapter maps the tabs back to `normal` / `pinned` / `essential`.
-7. Synthetic drops verify all four cross-zone transitions create exactly one
+7. The adapter maps the tabs back to `normal` / `pinned` / `essential`.
+8. Synthetic drops verify all four cross-zone transitions create exactly one
    copy, keep the source protected, and select the copy.
-8. Same-zone reordering and normal-tab drops are checked to stay native.
-9. Duplication failure and a protected `about:config` tab are checked to leave
-   the source intact.
-10. Close, close-current, mixed multi-close, unpin, Remove from Essentials, and
+9. Same-zone reordering and normal-tab drops are checked to stay native.
+10. Duplication failure and a protected `about:config` tab are checked to leave
+    the source intact.
+11. Close, close-current, mixed multi-close, unpin, Remove from Essentials, and
     Zen's close shortcut are checked against protected and normal tabs.
-11. Unloading a protected tab is checked to remain available.
-12. Install, re-install, uninstall, and disabled mode are checked against a tab
+12. Unloading a protected tab is checked to remain available.
+13. Close-button CSS, folder-contained tabs, and context-menu restrictions are
+    checked; Zen's native hidden/disabled menu state must remain unchanged.
+14. Install, re-install, uninstall, and disabled mode are checked against a tab
     fingerprint to prove tabs were not changed.
-13. A second window is opened to verify the `domwindowopened` observer, close
-    guard, and drop hook attach without touching tabs.
-14. Zen restarts on the same profile and the original tabs must restore with
+15. Uninstall removes the active marker, menu style and guards so native close
+    affordances return.
+16. A second window is opened to verify the `domwindowopened` observer, close
+    guard, menu style, and drop hook attach without touching tabs.
+17. Zen restarts on the same profile and the original tabs must restore with
     their zones intact, with both guards reattached.
-15. Zen shuts down, and the temporary profile is removed.
+18. Zen shuts down, and the temporary profile is removed.
 
 Useful flags:
 
@@ -123,7 +131,58 @@ The profile is rejected if it is `~/.zen` or inside it. If the requested
 Marionette port is already used by another Zen, the `moz:profile` check aborts
 the run before any privileged script executes.
 
-## Close and demotion protection
+## Close affordances, menus and lifecycle
+
+Issue #4 prioritizes hiding accidental close affordances and preventing
+destructive menu commands from appearing actionable. The intentional
+removal/unlock interaction is deliberately **not decided**; no unlock command,
+timer, or demotion bypass is implemented in this phase.
+
+### Close affordance CSS
+
+`userChrome.css` hides the close button/overlay for Pinned and Essential tabs
+only inside a window with the `svalinn-active` marker:
+
+```css
+:root[svalinn-active] .tabbrowser-tab[pinned] .tab-close-button { ... }
+```
+
+The marker is set by the adapter **only after** every guard for that window has
+installed successfully. It is removed on uninstall, disable, partial-install
+rollback, and window detach. If the adapter is absent or failed, the CSS is inert
+and Zen's native controls return. Normal tabs are never matched.
+
+CSS is presentation only. It cannot block `Ctrl+W`, middle click, context menus,
+drag/drop, or native removal; the privileged behavioral guard is the security
+boundary. Zen Mods/themes that override tab-strip CSS may re-show the close
+control, but closing remains blocked. The selectors cover ordinary, Pinned,
+Essential, and folder-contained tabs; visual checks still need to be repeated in
+light/dark themes and compact/expanded layouts.
+
+Requires:
+
+```text
+toolkit.legacyUserProfileCustomizations.stylesheets = true
+```
+
+### Context menu
+
+Zen owns the native `hidden`/`disabled` state of context-menu items. Svalinn does
+not mutate it. While a protected tab's menu is open, the adapter marks destructive
+commands with a `svalinn-blocked` attribute; a small injected style hides only
+those marked items:
+
+- Close Tab
+- Unpin Tab / Unpin Selected Tabs
+- Remove from Essentials
+
+On the next menu opening the marks are recomputed from the actual context tab, so
+normal tabs, multi-selection, and Zen's own visibility decisions remain intact.
+Uninstall removes the marks and the style element. Context-menu commands therefore
+do not appear active while their behavior is guarded; an approved intentional
+removal interaction remains follow-up work in issue #4.
+
+## Close and demotion protection## Close and demotion protection
 
 With the adapter installed, protected tabs cannot be closed or demoted through
 the covered browser paths:
@@ -152,10 +211,10 @@ Safety and lifecycle rules:
   or while the application is shutting down, so browser quit, window close,
   session restore, and updates are not trapped.
 - Unloading/suspending is never intercepted.
-- Disabling the integration (`Svalinn.setEnabled(false)` or `uninstall()`) is the
-  explicit temporary unlock path: the close, demotion, and drop hooks are
-  removed until the next install.
-- Installing is all-or-nothing: both the close guard and drop guard must attach.
+- Disabling/uninstalling removes the hooks; this is a development lifecycle
+  control, not an approved intentional-removal workflow.
+- Installing is all-or-nothing: both the close guard and drop guard must attach;
+  the CSS active marker and menu style are applied only after success.
 
 ### Manual smoke matrix
 
@@ -176,9 +235,17 @@ perform the following by hand in a test profile:
 | Close browser window | Allowed | Allowed | Allowed |
 | Disable integration, then close | Allowed | Allowed | Allowed |
 
-The automated smoke test covers the API-level versions of these paths, the Zen
-close shortcut, mixed multi-close, unloading, uninstall/disabled mode,
-multi-window attachment, restart/session restore, and shutdown.
+Manual presentation checks: protected tabs show no close X while the adapter is
+active; normal tabs look unchanged; Pinned tabs inside folders are covered. Repeat
+in light/dark themes and compact/expanded tab layouts, then disable/uninstall and
+confirm Zen's native close controls return. An intentional removal interaction is
+still pending a product decision; do not disable protection as a workflow shortcut.
+
+The automated smoke test covers the API-level close/unpin/removal paths, the Zen
+close shortcut, mixed multi-close, unloading, CSS close-button visibility,
+folder-contained tabs, locked context-menu restrictions without mutating native
+menu state, uninstall restoring native affordances, multi-window attachment,
+restart/session restore, and shutdown.
 
 ## Cross-zone duplication
 
@@ -238,9 +305,11 @@ There is intentionally no persistent installation for this phase.
   can be deleted. There is no prior state to restore in Zen's installation
   directory or daily profile.
 
-The adapter is disabled by default (`svalinn.enabled = false`). The smoke test
-passes `enabled: true` explicitly. A disabled call returns
-`{ status: "disabled" }` and attaches nothing.
+The adapter is disabled by default (`svalinn.enabled` defaults to `false`) and
+the smoke test passes `enabled: true` explicitly. A disabled call returns
+`{ status: "disabled" }` and attaches nothing. The intentional-removal UX is
+deferred, so uninstall/disable remains only a development lifecycle control, not
+a documented user workflow.
 
 ### In-browser API
 
@@ -313,28 +382,44 @@ npm run zen:smoke
 - capability probing, including non-Zen, renamed methods, hostile globals, and
   unverified versions
 - adapter behaviour in a VM: close/unpin/remove-essentials guards, mixed
-  multi-close filtering, group close blocking, unload passthrough, shutdown/
-  startup/window-close bypasses, opt-in/disabled mode, idempotent install, clean
-  uninstall, startup timeouts, multi-window snapshots and observer attachment,
-  cross-zone duplication, native reordering, event-driven lazy SessionStore
-  restoration (including a nonempty-id false signal), restore timeout, unknown
-  and throwing targets, planning errors, uninstall cancellation, duplication
-  failures, Essential rejection, and no source-tab mutation
-- injection bundling and Marionette framing/error handling
+  multi-close filtering, group close blocking, unload passthrough,
+  shutdown/startup/window-close bypasses, active-marker lifecycle on
+  install/uninstall/failed install, native context-menu hidden-state preservation,
+  opt-in/disabled mode, idempotent install, clean uninstall, startup timeouts,
+  multi-window snapshots and observer attachment, cross-zone duplication,
+  native reordering, event-driven lazy SessionStore restoration (including a
+  nonempty-id false signal), restore timeout, unknown and throwing targets,
+  planning errors, uninstall cancellation, duplication failures, Essential
+  rejection, and no source-tab mutation
+- injection bundling, CSS marker scoping, and Marionette framing/error handling
 
 `npm run zen:smoke` is the integration check against a real Zen process. It
-covers startup, capability probing, install/uninstall, close/unpin/removal
-guards, mixed multi-close, Zen's close shortcut, unloading, all four cross-zone
-transitions, same-zone and normal-tab dragging, deletion-safe failure paths,
-`about:config` duplication, an unknown-target negative control, delayed-restore
-cancellation by uninstall, reinstall after cancellation, multi-window
-attachment, restart/session restore, and shutdown. It is not part of `npm test`
-because it launches a browser.
+covers startup, pre-install CSS being inert, capability probing, install/uninstall,
+close/unpin/removal guards, mixed multi-close, Zen's close shortcut, unloading,
+CSS close-button visibility, folder-contained tabs, locked context-menu
+restrictions without mutating Zen's native hidden state, CSS/guards restored
+after uninstall, all four cross-zone transitions, same-zone and normal-tab
+dragging, deletion-safe failure paths, `about:config` duplication, an
+unknown-target negative control, delayed-restore cancellation by uninstall,
+reinstall after cancellation, multi-window attachment, restart/session restore,
+and shutdown. It is not part of `npm test` because it launches a browser.
 
 ## Known limitations
 
 - The adapter is a development/smoke harness, not a user-facing installation
   method. A future issue must choose and document a supported deployment path.
+- Intentional close/unpin/Remove-from-Essentials UX is not implemented; issue #4
+  deliberately defers that product decision. No unlock command, timer, or
+  demotion bypass exists.
+- CSS hiding is presentation only and can be overridden by Zen Mods or themes;
+  the behavioral guard remains authoritative. The active marker ensures the CSS
+  is inert when the adapter is absent, disabled, uninstalled, or failed to
+  install.
+- The context-menu style only adds `svalinn-blocked` display restrictions; Zen's
+  native `hidden`/`disabled` state is not modified.
+- With a mixed multi-selection where the context tab is normal, Unpin Selected
+  Tabs can remain visible; normal tabs may unpin while protected tabs stay
+  guarded. This interim mixed-selection UX is documented rather than hidden.
 - Guards cover the tabbrowser close/unpin/Essential-removal entry points. Tab
   groups containing a protected tab are blocked entirely rather than partially
   closed.

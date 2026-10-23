@@ -17,14 +17,17 @@
 
 ## Current status
 
-**Close/unpin/removal protection and cross-zone duplication implemented and smoke-tested.**
+**Close/unpin/removal protection, cross-zone duplication, and lifecycle-safe close-affordance/menu hiding implemented and smoke-tested.**
 
 - `src/policy.mjs`: dependency-free, testable protection rules.
 - `tests/`: policy regression tests plus adapter, capability, close-guard,
-  drop-guard, bundling, and protocol tests. Run with `npm test`.
+  drop-guard, CSS-scope, bundling, and protocol tests. Run with `npm test`.
 - `src/zen/`: privileged adapter with close/demotion and cross-zone drop guards,
-  plus a Marionette smoke harness.
-- `userChrome.css`: visual draft; **does not protect against keyboard, drag/drop, or native tab removal**.
+  lifecycle-scoped close-affordance CSS and context-menu restrictions, plus a
+  Marionette smoke harness.
+- `userChrome.css`: hides the close X/overlay for protected tabs only while the
+  adapter is successfully installed (`:root[svalinn-active]`). CSS is not the
+  security boundary.
 - `assets/icon.svg`: earlier provisional icon, not yet approved as final.
 
 Observed on **Zen 1.23.4b** (TufTux, Arch Linux): `ZenPinnedTabManager.mjs` includes `removeEssentials`, `addToEssentials`, `onCloseTabShortcut`, and `moveToAnotherTabContainerIfNecessary`. Dragging a Pinned to normal invokes `gBrowser.unpinTab`.
@@ -36,6 +39,11 @@ Zen Mods are CSS-only. A true guard requires a privileged integration with brows
 - Mixed multi-close still closes normal tabs and keeps protected tabs.
 - Normal tabs, unloading, browser quit, window close, and session restore stay
   native.
+- Close X/overlay are hidden while active; destructive context-menu entries are
+  visually blocked without changing Zen's native menu state. Uninstall/disable
+  removes the marker and restores native affordances.
+- Intentional close/unpin removal UX is deliberately deferred by issue #4; there
+  is no unlock command, timer, or demotion bypass in this phase.
 - Cross-zone drag and drop duplicates for a single tab in one window:
 
 | Source | Target | Result |
@@ -51,11 +59,13 @@ The smoke harness validates these paths in a disposable profile:
 npm run zen:smoke
 ```
 
-It launches an isolated profile, injects the adapter, verifies
-normal/Pinned/Essential mapping, close/unpin/removal guards, mixed multi-close,
-the Zen close shortcut, unloading, all four duplication transitions, same-zone
-and normal-tab behavior, failure safety, uninstall during a pending restore,
-restart/session restore, then deletes the profile. It never patches
+It launches an isolated profile with `userChrome.css`, verifies pre-install CSS is
+inert, normal/Pinned/Essential mapping, close/unpin/removal guards, mixed
+multi-close, the Zen close shortcut, unloading, CSS close-button visibility,
+folder-contained tabs, context-menu restrictions that preserve Zen's native
+state, uninstall restoring native affordances, all four duplication transitions,
+same-zone and normal-tab behavior, failure safety, uninstall during a pending
+restore, restart/session restore, then deletes the profile. It never patches
 `/opt/zen-browser-bin` and never uses `~/.zen`. See
 [`docs/zen-integration.md`](docs/zen-integration.md) for the mechanism, manual
 smoke matrix, security model, and rollback steps.
@@ -97,8 +107,8 @@ resolved. A “Lock Essentials” option was discussed there, but Svalinn's
 
 ## Next tasks
 
-1. Choose and document a maintainable deployment path for the adapter (the smoke harness is not a user installation), then test in a disposable Zen profile and verify Zen update compatibility before enabling in the main profile.
-2. Extend pre-move duplication to multi-selected, cross-window, folder, tab-group and split-view cases.
-3. Add explicit temporary unlock and visual controls on top of the policy.
+1. Decide and implement the minimal intentional unpin/Remove-from-Essentials interaction (#4), without adding a permanent button or a broad bypass.
+2. Choose and document a maintainable deployment path for the adapter (the smoke harness is not a user installation), then test in a disposable Zen profile and verify Zen update compatibility before enabling in the main profile.
+3. Extend pre-move duplication to multi-selected, cross-window, folder, tab-group and split-view cases.
 
 **Safety:** do not patch `/opt/zen-browser-bin` or enable experimental scripts in the daily profile during development.

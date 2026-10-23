@@ -278,11 +278,107 @@ function makeDropTab(url, { pinned = false, essential = false } = {}) {
     documentGlobal: null,
     hasAttribute: name => attributes.has(name),
     setAttribute(name) {
-      if (name === "zen-essential") attributes.add(name);
+      attributes.add(name);
     },
     removeAttribute(name) {
       attributes.delete(name);
     },
+  };
+}
+
+function makeFakeDocument() {
+  const elements = new Map();
+  const menuListeners = new Map();
+
+  const makeElement = (id, hidden = false) => {
+    const attributes = new Map();
+    return {
+      id,
+      hidden,
+      attrs: attributes,
+      setAttribute(name, value) {
+        attributes.set(name, String(value));
+      },
+      getAttribute(name) {
+        return attributes.get(name) ?? null;
+      },
+      removeAttribute(name) {
+        attributes.delete(name);
+      },
+      addEventListener() {},
+      removeEventListener() {},
+      remove() {
+        elements.delete(id);
+      },
+    };
+  };
+
+  const menu = makeElement("tabContextMenu");
+  menu.addEventListener = (type, listener) => {
+    const entries = menuListeners.get(type) ?? [];
+    entries.push(listener);
+    menuListeners.set(type, entries);
+  };
+  menu.removeEventListener = (type, listener) => {
+    const entries = menuListeners.get(type) ?? [];
+    const index = entries.indexOf(listener);
+    if (index !== -1) entries.splice(index, 1);
+  };
+  menu.dispatchEvent = event => {
+    for (const listener of menuListeners.get(event.type) ?? []) listener(event);
+    return true;
+  };
+
+  elements.set("tabContextMenu", menu);
+  for (const [id, hidden] of [
+    ["context_closeTab", false],
+    ["context_unpinTab", true],
+    ["context_unpinSelectedTabs", true],
+    ["context_zen-remove-essential", true],
+  ]) {
+    elements.set(id, makeElement(id, hidden));
+  }
+
+  const documentElement = {
+    attributes: new Set(),
+    hasAttribute(name) {
+      return documentElement.attributes.has(name);
+    },
+    setAttribute(name) {
+      documentElement.attributes.add(name);
+    },
+    removeAttribute(name) {
+      documentElement.attributes.delete(name);
+    },
+    toggleAttribute(name, force) {
+      const next =
+        typeof force === "boolean"
+          ? force
+          : !documentElement.attributes.has(name);
+      if (next) documentElement.attributes.add(name);
+      else documentElement.attributes.delete(name);
+      return next;
+    },
+    appendChild(node) {
+      if (node?.id) elements.set(node.id, node);
+    },
+  };
+
+  return {
+    documentElement,
+    getElementById: id => elements.get(id) ?? null,
+    createElement: () => {
+      const node = {
+        id: "",
+        textContent: "",
+        remove() {
+          if (node.id) elements.delete(node.id);
+        },
+      };
+      return node;
+    },
+    elements,
+    menu,
   };
 }
 
@@ -445,8 +541,12 @@ function makeDropEnvironment() {
     onCloseTabShortcut() {},
   };
 
+  const document = makeFakeDocument();
+
   Object.assign(win, {
     closed: false,
+    document,
+    TabContextMenu: { contextTab: null },
     gBrowser,
     gZenPinnedTabManager: manager,
     gZenStartup: { isReady: true, promiseInitialized: Promise.resolve() },
@@ -471,6 +571,7 @@ function makeDropEnvironment() {
 
   return {
     win,
+    document,
     tabs,
     stats,
     dnd,
@@ -516,6 +617,92 @@ async function installDropEnvironment(options = {}) {
   assert.equal(report.status, "installed");
   return { ...env, api, services };
 }
+
+test("active markers follow install, uninstall and failed install", async () => {
+  const env = await installDropEnvironment();
+  assert.equal(
+    env.document.documentElement.hasAttribute("svalinn-active"),
+    true
+  );
+  assert.ok(env.document.getElementById("svalinn-menu-style"));
+  assert.equal(env.api.closeGuardedWindows(), 1);
+
+  env.api.uninstall();
+  assert.equal(
+    env.document.documentElement.hasAttribute("svalinn-active"),
+    false
+  );
+  assert.equal(env.document.getElementById("svalinn-menu-style"), null);
+  assert.equal(env.api.closeGuardedWindows(), 0);
+
+  const failed = makeDropEnvironment();
+  failed.win.gBrowser.removeCurrentTab = undefined;
+  const { api } = await makeContext({ windows: [failed.win] });
+  const report = await api.install({ enabled: true });
+  assert.equal(report.status, "unsupported");
+  assert.equal(
+    failed.document.documentElement.hasAttribute("svalinn-active"),
+    false
+  );
+  assert.equal(failed.document.getElementById("svalinn-menu-style"), null);
+  assert.equal(api.closeGuardedWindows(), 0);
+});
+
+test("context-menu blocking preserves Zen's native hidden states", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const essential = env.addTab("https://essential.test", {
+    pinned: true,
+    essential: true,
+  });
+  const normal = env.addTab("https://normal.test");
+  const doc = env.document;
+  const menu = doc.menu;
+  const close = doc.getElementById("context_closeTab");
+  const unpin = doc.getElementById("context_unpinTab");
+  const remove = doc.getElementById("context_zen-remove-essential");
+  const blocked = id =>
+    doc.getElementById(id).getAttribute("svalinn-blocked") === "true";
+
+  const show = tab => {
+    env.win.TabContextMenu.contextTab = tab;
+    menu.dispatchEvent({ type: "popupshowing", target: menu });
+  };
+
+  close.hidden = false;
+  unpin.hidden = false;
+  remove.hidden = true;
+  show(pinned);
+  assert.equal(blocked("context_closeTab"), true);
+  assert.equal(blocked("context_unpinTab"), true);
+  assert.equal(close.hidden, false);
+  assert.equal(unpin.hidden, false);
+  assert.equal(remove.hidden, true);
+
+  close.hidden = false;
+  unpin.hidden = true;
+  remove.hidden = true;
+  show(normal);
+  assert.equal(blocked("context_closeTab"), false);
+  assert.equal(blocked("context_unpinTab"), false);
+  assert.equal(blocked("context_zen-remove-essential"), false);
+  assert.equal(close.hidden, false);
+  assert.equal(unpin.hidden, true);
+  assert.equal(remove.hidden, true);
+
+  close.hidden = true;
+  unpin.hidden = true;
+  remove.hidden = false;
+  show(essential);
+  assert.equal(blocked("context_closeTab"), true);
+  assert.equal(blocked("context_zen-remove-essential"), true);
+  assert.equal(close.hidden, true);
+  assert.equal(remove.hidden, false);
+
+  env.api.uninstall();
+  assert.equal(blocked("context_closeTab"), false);
+  assert.equal(blocked("context_zen-remove-essential"), false);
+});
 
 test("blocks protected close gestures and keeps normal tabs closeable", async () => {
   const env = await installDropEnvironment();
