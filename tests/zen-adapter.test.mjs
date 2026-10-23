@@ -35,6 +35,8 @@ function makeWindow({
       addTab() {},
       duplicateTab() {},
       removeTab() {},
+      removeTabs() {},
+      removeCurrentTab() {},
       moveTabsBefore() {},
       moveTabTo() {},
       tabContainer: {
@@ -73,6 +75,7 @@ async function makeContext({
   const observers = [];
   const services = {
     appinfo: { name: appName, version },
+    startup: { shuttingDown: false },
     wm: { getEnumerator: () => windows.slice() },
     prefs: {
       getBoolPref: (name, fallback) =>
@@ -291,6 +294,13 @@ function makeDropEnvironment() {
     rejectEssentials: false,
     lazyDuplicate: false,
     selectedTab: null,
+    removeTabCalls: 0,
+    removeTabsCalls: 0,
+    removeCurrentTabCalls: 0,
+    removeGroupCalls: 0,
+    unpinCalls: 0,
+    removeEssentialsCalls: 0,
+    unloadCalls: 0,
   };
   const tabs = [];
   const win = {};
@@ -321,6 +331,7 @@ function makeDropEnvironment() {
       tab.pinned = true;
     },
     unpinTab(tab) {
+      stats.unpinCalls += 1;
       tab.pinned = false;
     },
     duplicateTab(source) {
@@ -363,8 +374,30 @@ function makeDropEnvironment() {
       return copy;
     },
     removeTab(tab) {
+      stats.removeTabCalls += 1;
       const index = tabs.indexOf(tab);
       if (index !== -1) tabs.splice(index, 1);
+    },
+    removeTabs(list) {
+      stats.removeTabsCalls += 1;
+      for (const tab of list) {
+        const index = tabs.indexOf(tab);
+        if (index !== -1) tabs.splice(index, 1);
+      }
+    },
+    removeCurrentTab() {
+      stats.removeCurrentTabCalls += 1;
+      this.removeTab(this.selectedTab);
+    },
+    removeTabGroup(group) {
+      stats.removeGroupCalls += 1;
+      this.removeTabs(group.tabs);
+      return Promise.resolve();
+    },
+    unloadTab(tab) {
+      stats.unloadCalls += 1;
+      tab.pending = true;
+      return true;
     },
     moveTabsBefore(moving, target) {
       for (const tab of [...moving].reverse()) {
@@ -405,6 +438,7 @@ function makeDropEnvironment() {
       return true;
     },
     removeEssentials(tab, unpin = true) {
+      stats.removeEssentialsCalls += 1;
       tab.removeAttribute("zen-essential");
       if (unpin) tab.pinned = false;
     },
@@ -412,10 +446,14 @@ function makeDropEnvironment() {
   };
 
   Object.assign(win, {
+    closed: false,
     gBrowser,
     gZenPinnedTabManager: manager,
     gZenStartup: { isReady: true, promiseInitialized: Promise.resolve() },
-    gZenWorkspaces: { promiseInitialized: Promise.resolve() },
+    gZenWorkspaces: {
+      promiseInitialized: Promise.resolve(),
+      _isClosingWindow: false,
+    },
     SessionStore: { promiseAllWindowsRestored: Promise.resolve() },
     delayedStartupPromise: Promise.resolve(),
     TAB_DROP_TYPE: "application/x-moz-tabbrowser-tab",
@@ -473,11 +511,145 @@ function makeDropEnvironment() {
 
 async function installDropEnvironment(options = {}) {
   const env = makeDropEnvironment();
-  const { api } = await makeContext({ windows: [env.win] });
+  const { api, services } = await makeContext({ windows: [env.win] });
   const report = await api.install({ enabled: true, ...options });
   assert.equal(report.status, "installed");
-  return { ...env, api };
+  return { ...env, api, services };
 }
+
+test("blocks protected close gestures and keeps normal tabs closeable", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const essential = env.addTab("https://essential.test", {
+    pinned: true,
+    essential: true,
+  });
+  const normal = env.addTab("https://normal.test");
+  const normal2 = env.addTab("https://normal2.test");
+
+  env.win.gBrowser.removeTab(pinned);
+  env.win.gBrowser.removeTab(essential);
+  assert.ok(env.tabs.includes(pinned));
+  assert.ok(env.tabs.includes(essential));
+  assert.equal(env.stats.removeTabCalls, 0);
+
+  env.win.gBrowser.selectedTab = essential;
+  env.win.gBrowser.removeCurrentTab();
+  assert.ok(env.tabs.includes(essential));
+  assert.equal(env.stats.removeCurrentTabCalls, 0);
+
+  env.win.gBrowser.removeTab(normal);
+  assert.equal(env.tabs.includes(normal), false);
+  assert.equal(env.stats.removeTabCalls, 1);
+
+  env.win.gBrowser.selectedTab = normal2;
+  env.win.gBrowser.removeCurrentTab();
+  assert.equal(env.tabs.includes(normal2), false);
+  assert.equal(env.stats.removeCurrentTabCalls, 1);
+});
+
+test("mixed multi-close removes only normal tabs", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const essential = env.addTab("https://essential.test", {
+    pinned: true,
+    essential: true,
+  });
+  const normal = env.addTab("https://normal.test");
+
+  env.win.gBrowser.removeTabs([pinned, essential, normal]);
+
+  assert.equal(env.tabs.includes(normal), false);
+  assert.ok(env.tabs.includes(pinned));
+  assert.ok(env.tabs.includes(essential));
+  assert.equal(env.stats.removeTabsCalls, 1);
+
+  env.win.gBrowser.removeTabs([pinned, essential]);
+  assert.equal(env.stats.removeTabsCalls, 1);
+  assert.ok(env.tabs.includes(pinned));
+  assert.ok(env.tabs.includes(essential));
+});
+
+test("blocks unpin and Essential removal, including context-menu calls", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const essential = env.addTab("https://essential.test", {
+    pinned: true,
+    essential: true,
+  });
+
+  env.win.gBrowser.unpinTab(pinned);
+  assert.equal(pinned.pinned, true);
+  assert.equal(env.stats.unpinCalls, 0);
+
+  env.win.gZenPinnedTabManager.removeEssentials(essential);
+  assert.equal(essential.hasAttribute("zen-essential"), true);
+  assert.equal(env.stats.removeEssentialsCalls, 0);
+
+  env.win.TabContextMenu = { contextTab: essential, multiselected: false };
+  env.win.gZenPinnedTabManager.removeEssentials();
+  assert.equal(essential.hasAttribute("zen-essential"), true);
+  assert.equal(env.stats.removeEssentialsCalls, 0);
+});
+
+test("unloading protected tabs remains available", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+
+  assert.equal(env.win.gBrowser.unloadTab(pinned), true);
+
+  assert.equal(env.stats.unloadCalls, 1);
+  assert.equal(pinned.pending, true);
+  assert.ok(env.tabs.includes(pinned));
+});
+
+test("shutdown, startup and window-close bypasses allow native removal", async () => {
+  const env = await installDropEnvironment();
+
+  const shuttingDown = env.addTab("https://shutdown.test", { pinned: true });
+  env.services.startup.shuttingDown = true;
+  env.win.gBrowser.removeTab(shuttingDown);
+  assert.equal(env.tabs.includes(shuttingDown), false);
+  env.services.startup.shuttingDown = false;
+
+  const starting = env.addTab("https://startup.test", { pinned: true });
+  env.win.gZenStartup.isReady = false;
+  env.win.gBrowser.removeTab(starting);
+  assert.equal(env.tabs.includes(starting), false);
+  env.win.gZenStartup.isReady = true;
+
+  const closing = env.addTab("https://closing.test", { pinned: true });
+  env.win.gZenWorkspaces._isClosingWindow = true;
+  env.win.gBrowser.removeTab(closing);
+  assert.equal(env.tabs.includes(closing), false);
+  env.win.gZenWorkspaces._isClosingWindow = false;
+});
+
+test("blocks closing a group that contains a protected tab", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const normal = env.addTab("https://normal.test");
+
+  await env.win.gBrowser.removeTabGroup({ tabs: [pinned] });
+  assert.ok(env.tabs.includes(pinned));
+  assert.equal(env.stats.removeGroupCalls, 0);
+
+  await env.win.gBrowser.removeTabGroup({ tabs: [normal] });
+  assert.equal(env.tabs.includes(normal), false);
+  assert.equal(env.stats.removeGroupCalls, 1);
+});
+
+test("uninstall restores close hooks", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+
+  assert.equal(env.api.closeGuardedWindows(), 1);
+  env.api.uninstall();
+  assert.equal(env.api.closeGuardedWindows(), 0);
+
+  env.win.gBrowser.removeTab(pinned);
+  assert.equal(env.tabs.includes(pinned), false);
+});
 
 test("cross-zone drops duplicate and preserve the protected source", async () => {
   for (const [sourceZone, targetZone] of [

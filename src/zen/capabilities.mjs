@@ -16,6 +16,8 @@ export const REQUIRED_METHODS = Object.freeze({
     "addTab",
     "duplicateTab",
     "removeTab",
+    "removeTabs",
+    "removeCurrentTab",
     "moveTabsBefore",
     "moveTabTo",
   ],

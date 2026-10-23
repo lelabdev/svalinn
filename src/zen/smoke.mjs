@@ -707,6 +707,124 @@ return {
   );
 }
 
+async function runCloseProtectionScenarios(client, urls) {
+  return runScript(
+    client,
+    `
+const win = [...Services.wm.getEnumerator("navigator:browser")][0];
+const api = globalThis.Svalinn;
+const gBrowser = win.gBrowser;
+const manager = win.gZenPinnedTabManager;
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+const zone = tab =>
+  tab.hasAttribute("zen-essential")
+    ? "essential"
+    : tab.pinned
+      ? "pinned"
+      : "normal";
+const principal = Services.scriptSecurityManager.getSystemPrincipal();
+const base = ${JSON.stringify(urls.normal)};
+let seq = 0;
+const tabsInclude = tab => [...gBrowser.tabs].includes(tab);
+
+const makeTab = async ({ pinned = false, essential = false } = {}) => {
+  const tab = gBrowser.addTab(base + "#close-" + ++seq, {
+    triggeringPrincipal: principal,
+    inBackground: true,
+  });
+  await wait(80);
+  if (pinned || essential) gBrowser.pinTab(tab);
+  await wait(60);
+  if (essential) manager.addToEssentials(tab);
+  await wait(120);
+  return tab;
+};
+
+const results = [];
+const check = (name, ok, details) => results.push({ name, ok, details });
+
+const pinned = await makeTab({ pinned: true });
+const essential = await makeTab({ essential: true });
+const normal = await makeTab();
+const normalMulti = await makeTab();
+
+gBrowser.removeTab(pinned);
+gBrowser.removeTab(essential);
+check(
+  "close-protected-blocked",
+  tabsInclude(pinned) && tabsInclude(essential),
+  { pinned: tabsInclude(pinned), essential: tabsInclude(essential), pinnedZone: zone(pinned), essentialZone: zone(essential) }
+);
+
+gBrowser.selectedTab = essential;
+gBrowser.removeCurrentTab();
+check(
+  "close-current-protected-blocked",
+  tabsInclude(essential) && zone(essential) === "essential",
+  { present: tabsInclude(essential), zone: zone(essential) }
+);
+
+gBrowser.removeTab(normal);
+check(
+  "close-normal-allowed",
+  !tabsInclude(normal),
+  { present: tabsInclude(normal) }
+);
+
+gBrowser.removeTabs([pinned, normalMulti]);
+await wait(600);
+check(
+  "multi-close-keeps-protected",
+  tabsInclude(pinned) && !tabsInclude(normalMulti),
+  { pinned: tabsInclude(pinned), normal: tabsInclude(normalMulti) }
+);
+
+gBrowser.unpinTab(pinned);
+manager.removeEssentials(essential);
+check(
+  "demotion-blocked",
+  pinned.pinned === true && essential.hasAttribute("zen-essential"),
+  {
+    pinnedPinned: pinned.pinned,
+    essentialEssential: essential.hasAttribute("zen-essential"),
+    pinnedZone: zone(pinned),
+    essentialZone: zone(essential),
+  }
+);
+
+const shortcutEvent = { stopPropagation() {}, preventDefault() {} };
+await manager.onCloseTabShortcut(shortcutEvent, pinned, { behavior: "close" });
+check(
+  "zen-close-shortcut-blocked",
+  tabsInclude(pinned) && zone(pinned) === "pinned",
+  { present: tabsInclude(pinned), zone: zone(pinned) }
+);
+
+const unloaded = await gBrowser.explicitUnloadTabs([pinned]);
+check(
+  "unload-protected-allowed",
+  unloaded === true && tabsInclude(pinned),
+  { unloaded, present: tabsInclude(pinned), pending: pinned.hasAttribute("pending") }
+);
+
+const normalCurrent = await makeTab();
+gBrowser.selectedTab = normalCurrent;
+gBrowser.removeCurrentTab();
+check(
+  "close-current-normal-allowed",
+  !tabsInclude(normalCurrent),
+  { present: tabsInclude(normalCurrent) }
+);
+
+return {
+  results,
+  closeGuarded: api.closeGuardedWindows(),
+  warnings: api.snapshot().warnings,
+};`,
+    { timeoutMs: 60_000 }
+  );
+}
+
 function zoneMap(snapshot, urls) {
   const byUrl = new Map();
   for (const win of snapshot?.windows ?? []) {
@@ -825,7 +943,7 @@ export async function runSmoke(options) {
 
     phase = "injection";
     const injected = await ensureAdapter(client, 30_000);
-    record("adapter-injected", injected.adapter === "0.2.0" && injected.policy.length >= 4, injected);
+    record("adapter-injected", injected.adapter === "0.3.0" && injected.policy.length >= 4, injected);
 
     const probe = await runAdapter(
       client,
@@ -853,6 +971,19 @@ export async function runSmoke(options) {
       hookState
     );
 
+    const closeHookState = await runAdapter(
+      client,
+      `return {
+        count: api.closeGuardedWindows(),
+        windows: api.snapshot().windows.map(window => window.closeHooked),
+      };`
+    );
+    record(
+      "close-guard-installed",
+      closeHookState.count >= 1 && closeHookState.windows.every(Boolean),
+      closeHookState
+    );
+
     phase = "tabs";
     const created = await createSmokeTabs(client, profileInfo.urls);
     const snapshot = await runAdapter(client, `return api.snapshot();`);
@@ -867,10 +998,24 @@ export async function runSmoke(options) {
     }
     record("drag-drop-hooks-intact", drops.hooked >= 1, { hooked: drops.hooked });
 
+    phase = "close-protection";
+    const closeChecks = await runCloseProtectionScenarios(
+      client,
+      profileInfo.urls
+    );
+    for (const result of closeChecks.results) {
+      record(result.name, result.ok, result.details);
+    }
+    record(
+      "close-guard-intact",
+      closeChecks.closeGuarded >= 1,
+      { closeGuarded: closeChecks.closeGuarded }
+    );
+
     const afterDropSnapshot = await runAdapter(client, `return api.snapshot();`);
     const afterDropZones = zoneMap(afterDropSnapshot, profileInfo.urls);
     record(
-      "tab-zones-after-drag",
+      "tab-zones-after-guards",
       expectZoneMap(afterDropZones, profileInfo.urls).length === 0,
       { zones: afterDropZones }
     );
@@ -894,6 +1039,7 @@ export async function runSmoke(options) {
          attached: Boolean(win.__svalinn),
          installed: globalThis.Svalinn.snapshot().installed,
          hooked: globalThis.Svalinn.hookedWindows(),
+         closeHooked: globalThis.Svalinn.closeGuardedWindows(),
        };`
     );
     record(
@@ -902,7 +1048,8 @@ export async function runSmoke(options) {
         afterUninstall === before &&
         markerState.attached === false &&
         markerState.installed === false &&
-        markerState.hooked === 0,
+        markerState.hooked === 0 &&
+        markerState.closeHooked === 0,
       { status: uninstalled.status, tabsChanged: afterUninstall !== before, markerState }
     );
 
@@ -915,6 +1062,7 @@ export async function runSmoke(options) {
          attached: Boolean(win.__svalinn),
          installed: globalThis.Svalinn.snapshot().installed,
          hooked: globalThis.Svalinn.hookedWindows(),
+         closeHooked: globalThis.Svalinn.closeGuardedWindows(),
        };`
     );
     record(
@@ -922,7 +1070,8 @@ export async function runSmoke(options) {
       disabled.status === "disabled" &&
         disabled.installed === false &&
         disabledMarker.attached === false &&
-        disabledMarker.hooked === 0,
+        disabledMarker.hooked === 0 &&
+        disabledMarker.closeHooked === 0,
       { status: disabled.status, marker: disabledMarker }
     );
 
@@ -947,6 +1096,8 @@ while (!second.__svalinn && Date.now() < deadline) {
 const attached = Boolean(second.__svalinn);
 const sameInstance = second.__svalinn === globalThis.Svalinn;
 const firstAttached = Boolean(win.__svalinn);
+const secondCloseHooked = Boolean(second.gBrowser.__svalinnCloseHook);
+const closeGuarded = globalThis.Svalinn.closeGuardedWindows();
 const snapshot = globalThis.Svalinn.snapshot();
 const windows = snapshot.windows.length;
 const windowsWithManager = snapshot.windows.filter(window => window.hasManager).length;
@@ -956,6 +1107,8 @@ return {
   attached,
   sameInstance,
   firstAttached,
+  secondCloseHooked,
+  closeGuarded,
   windows,
   windowsWithManager,
   remaining: [...Services.wm.getEnumerator("navigator:browser")].length,
@@ -971,6 +1124,8 @@ return {
         multi.attached === true &&
         multi.sameInstance === true &&
         multi.firstAttached === true &&
+        multi.secondCloseHooked === true &&
+        multi.closeGuarded >= 2 &&
         multi.windows >= 2 &&
         multi.windowsWithManager >= 2 &&
         multi.remaining >= 1 &&
@@ -1008,12 +1163,16 @@ return {
       );
       const restoredHooks = await runAdapter(
         client,
-        `return api.hookedWindows();`
+        `return {
+          drop: api.hookedWindows(),
+          close: api.closeGuardedWindows(),
+        };`
       );
       record(
         "restart-reattach-safe",
         restoredInstall.status === "installed" &&
-          restoredHooks >= 1 &&
+          restoredHooks.drop >= 1 &&
+          restoredHooks.close >= 1 &&
           afterRestartInstall === fingerprint(restoredSnapshot),
         { status: restoredInstall.status, hooked: restoredHooks }
       );
