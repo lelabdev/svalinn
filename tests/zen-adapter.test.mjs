@@ -926,7 +926,7 @@ test("uninstall restores close hooks", async () => {
   assert.equal(env.tabs.includes(pinned), false);
 });
 
-test("cross-zone drops duplicate and preserve the protected source", async () => {
+test("block mode keeps protected tabs in their category on cross-zone drops", async () => {
   for (const [sourceZone, targetZone] of [
     ["essential", "normal"],
     ["essential", "pinned"],
@@ -934,6 +934,31 @@ test("cross-zone drops duplicate and preserve the protected source", async () =>
     ["pinned", "essential"],
   ]) {
     const env = await installDropEnvironment();
+    const source = env.addTab(`https://${sourceZone}.test`, {
+      pinned: true,
+      essential: sourceZone === "essential",
+    });
+    source._dragData = { movingTabs: [source] };
+    const before = env.tabs.length;
+
+    env.drop({ source }, targetZone);
+
+    assert.equal(env.tabs.length, before, `${sourceZone} -> ${targetZone}`);
+    assert.equal(env.api.classify(source).zone, sourceZone);
+    assert.equal(env.stats.nativeDrops, 0);
+    assert.equal(env.stats.duplicateCalls, 0);
+    assert.equal(env.api.pendingDuplications(), 0);
+  }
+});
+
+test("duplicate mode copies protected tabs across zones", async () => {
+  for (const [sourceZone, targetZone] of [
+    ["essential", "normal"],
+    ["essential", "pinned"],
+    ["pinned", "normal"],
+    ["pinned", "essential"],
+  ]) {
+    const env = await installDropEnvironment({ dragBehavior: "duplicate" });
     const source = env.addTab(`https://${sourceZone}.test`, {
       pinned: true,
       essential: sourceZone === "essential",
@@ -1002,7 +1027,7 @@ test("normal sources still use native behavior for unknown targets", async () =>
 });
 
 test("applies the destination zone after lazy SessionStore restore", async () => {
-  const env = await installDropEnvironment();
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
   env.stats.lazyDuplicate = true;
   const source = env.addTab("https://pinned.test", { pinned: true });
   const target = env.addTab("https://essential.test", {
@@ -1024,7 +1049,7 @@ test("applies the destination zone after lazy SessionStore restore", async () =>
 });
 
 test("does not treat a nonempty id as proof of restoration", async () => {
-  const env = await installDropEnvironment();
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
   env.stats.lazyDuplicate = "with-id";
   const source = env.addTab("https://pinned.test", { pinned: true });
   const target = env.addTab("https://essential.test", {
@@ -1047,7 +1072,10 @@ test("does not treat a nonempty id as proof of restoration", async () => {
 });
 
 test("restore timeout removes the pending copy and keeps the source", async () => {
-  const env = await installDropEnvironment({ restoreTimeoutMs: 20 });
+  const env = await installDropEnvironment({
+    restoreTimeoutMs: 20,
+    dragBehavior: "duplicate",
+  });
   env.stats.lazyDuplicate = "never";
   const source = env.addTab("https://pinned.test", { pinned: true });
   source._dragData = { movingTabs: [source] };
@@ -1062,7 +1090,7 @@ test("restore timeout removes the pending copy and keeps the source", async () =
 });
 
 test("uninstall cancels pending restoration before it can mutate tabs", async () => {
-  const env = await installDropEnvironment();
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
   env.stats.lazyDuplicate = true;
   const source = env.addTab("https://pinned.test", { pinned: true });
   source._dragData = { movingTabs: [source] };
@@ -1090,7 +1118,7 @@ test("uninstall cancels pending restoration before it can mutate tabs", async ()
 });
 
 test("window unload cancels pending restoration and detaches hooks", async () => {
-  const env = await installDropEnvironment();
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
   env.stats.lazyDuplicate = true;
   const source = env.addTab("https://pinned.test", { pinned: true });
   source._dragData = { movingTabs: [source] };
@@ -1134,7 +1162,7 @@ test("same-zone reordering and normal-tab drops stay native", async () => {
 });
 
 test("duplication failures leave the protected source untouched", async () => {
-  const env = await installDropEnvironment();
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
   const source = env.addTab("https://essential.test", {
     pinned: true,
     essential: true,
@@ -1149,7 +1177,7 @@ test("duplication failures leave the protected source untouched", async () => {
 });
 
 test("rejected Essential duplication removes the copy and keeps the source", async () => {
-  const env = await installDropEnvironment();
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
   const source = env.addTab("https://pinned.test", { pinned: true });
   source._dragData = { movingTabs: [source] };
   env.stats.rejectEssentials = true;
@@ -1161,20 +1189,72 @@ test("rejected Essential duplication removes the copy and keeps the source", asy
   assert.equal(env.api.classify(source).zone, "pinned");
 });
 
-test("cross-window and multi-tab drags stay native", async () => {
+test("cross-window and multi-tab protected drops fail closed", async () => {
   const env = await installDropEnvironment();
   const source = env.addTab("https://pinned.test", { pinned: true });
   source._dragData = { movingTabs: [source] };
 
   source.documentGlobal = { gBrowser: {} };
   env.drop({ source }, "normal");
-  assert.equal(env.stats.nativeDrops, 1);
+  assert.equal(env.stats.nativeDrops, 0);
+  assert.equal(env.api.classify(source).zone, "pinned");
 
   source.documentGlobal = env.win;
-  const other = env.addTab("https://other.test");
+  const other = env.addTab("https://other.test", { pinned: true });
   source._dragData = { movingTabs: [source, other] };
   env.drop({ source }, "normal");
-  assert.equal(env.stats.nativeDrops, 2);
+  assert.equal(env.stats.nativeDrops, 0);
+  assert.equal(env.api.classify(source).zone, "pinned");
+  assert.equal(env.api.classify(other).zone, "pinned");
+
+  const normalA = env.addTab("https://normal-a.test");
+  const normalB = env.addTab("https://normal-b.test");
+  normalA._dragData = { movingTabs: [normalA, normalB] };
+  env.drop({ source: normalA }, "pinned");
+  assert.equal(env.stats.nativeDrops, 1);
+});
+
+test("drag behavior setting is session-scoped and validated", async () => {
+  const env = await installDropEnvironment();
+  assert.equal(env.api.dragBehavior(), "block");
+  assert.equal(env.api.setDragBehavior("duplicate"), "duplicate");
+  assert.equal(env.api.dragBehavior(), "duplicate");
+  assert.equal(env.api.setDragBehavior("unknown"), "block");
+  assert.equal(env.api.dragBehavior(), "block");
+  assert.equal(env.api.snapshot().dragBehavior, "block");
+});
+
+test("multi-selection reordering within a zone stays native", async () => {
+  const env = await installDropEnvironment();
+  const first = env.addTab("https://pinned-a.test", { pinned: true });
+  const second = env.addTab("https://pinned-b.test", { pinned: true });
+  first._dragData = { movingTabs: [first, second] };
+
+  env.drop({ source: first }, "pinned");
+
+  assert.equal(env.stats.nativeDrops, 1);
+  assert.equal(env.stats.duplicateCalls, 0);
+  assert.equal(env.api.classify(first).zone, "pinned");
+  assert.equal(env.api.classify(second).zone, "pinned");
+});
+
+test("group/split-view moves containing a protected tab fail closed", async () => {
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
+  const source = env.addTab("https://pinned.test", { pinned: true });
+  const protectedChild = env.addTab("https://child.test", {
+    pinned: true,
+    essential: true,
+  });
+  source.group = { tabs: [source, protectedChild] };
+  source._dragData = { movingTabs: [source] };
+
+  env.drop({ source }, "normal");
+
+  assert.equal(env.stats.nativeDrops, 0);
+  assert.equal(env.stats.duplicateCalls, 0);
+  assert.equal(env.api.classify(protectedChild).zone, "essential");
+  assert.ok(env.tabs.includes(protectedChild));
+  assert.ok(env.tabs.includes(source));
 });
 
 test("uninstall restores the native drop handler", async () => {

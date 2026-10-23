@@ -493,6 +493,7 @@ const zone = tab =>
     : tab.pinned
       ? "pinned"
       : "normal";
+const tabsInclude = tab => [...gBrowser.tabs].includes(tab);
 const principal = Services.scriptSecurityManager.getSystemPrincipal();
 const base = ${JSON.stringify(urls.normal)};
 let seq = 0;
@@ -510,15 +511,10 @@ const makeTab = async ({ pinned = false, essential = false, url = null } = {}) =
   return tab;
 };
 
-const dropTab = async (source, target) => {
-  dispatchDrop(source, target);
-  await wait(250);
-};
-
-const dispatchDrop = (source, target) => {
+const dispatchDrop = (source, target, movingTabs = [source]) => {
   source._dragData = {
-    movingTabs: [source],
-    movingTabsSet: new Set([source]),
+    movingTabs,
+    movingTabsSet: new Set(movingTabs),
     fromTabList: false,
     dropElement: target,
     dropBefore: true,
@@ -539,6 +535,11 @@ const dispatchDrop = (source, target) => {
     screenY: (target.screenY ?? rect.top) + rect.height / 2 + 2,
   });
   target.dispatchEvent(event);
+};
+
+const dropTab = async (source, target, movingTabs = [source]) => {
+  dispatchDrop(source, target, movingTabs);
+  await wait(300);
 };
 
 const results = [];
@@ -579,6 +580,21 @@ const duplicateScenario = async (name, source, target, expectedZone) => {
   );
 };
 
+const blockedScenario = async (name, source, target, expectedZone) => {
+  const before = new Set(gBrowser.tabs);
+  await dropTab(source, target);
+  const added = addedSince(before);
+  check(
+    name,
+    added.length === 0 && zone(source) === expectedZone,
+    {
+      added: added.length,
+      sourceZone: zone(source),
+      expectedSourceZone: expectedZone,
+    }
+  );
+};
+
 const nativeScenario = async (name, source, target, expectedSourceZone) => {
   const before = new Set(gBrowser.tabs);
   await dropTab(source, target);
@@ -601,12 +617,74 @@ const pinnedB = await makeTab({ pinned: true });
 const essentialA = await makeTab({ essential: true });
 const essentialB = await makeTab({ essential: true });
 
-await duplicateScenario("drag-essential-to-normal", essentialA, normalA, "normal");
-await duplicateScenario("drag-pinned-to-normal", pinnedA, normalA, "normal");
-await duplicateScenario("drag-pinned-to-essential", pinnedB, essentialB, "essential");
-await duplicateScenario("drag-essential-to-pinned", essentialB, pinnedB, "pinned");
+// Default mode: block category-changing drags without copies or source changes.
+await blockedScenario("drag-block-essential-to-normal", essentialA, normalA, "essential");
+await blockedScenario("drag-block-pinned-to-normal", pinnedA, normalA, "pinned");
+await blockedScenario("drag-block-pinned-to-essential", pinnedB, essentialB, "pinned");
+await blockedScenario("drag-block-essential-to-pinned", essentialB, pinnedB, "essential");
+
+// Same-category reordering and normal tabs remain native in block mode.
 await nativeScenario("drag-same-zone-native", pinnedA, pinnedB, "pinned");
 await nativeScenario("drag-normal-native", normalB, pinnedB, "pinned");
+
+// Multi-selected protected tabs crossing zones are blocked; same-zone reorder is native.
+const beforeMulti = new Set(gBrowser.tabs);
+await dropTab(pinnedA, normalA, [pinnedA, pinnedB]);
+check(
+  "drag-multi-cross-zone-blocked",
+  addedSince(beforeMulti).length === 0 &&
+    zone(pinnedA) === "pinned" &&
+    zone(pinnedB) === "pinned",
+  {
+    added: addedSince(beforeMulti).length,
+    firstZone: zone(pinnedA),
+    secondZone: zone(pinnedB),
+  }
+);
+await nativeScenario("drag-multi-same-zone-native", pinnedA, pinnedB, "pinned");
+
+// Folder-contained protected tab can be reorganized inside the pinned category.
+const folderSource = await makeTab({ pinned: true });
+win.gZenFolders.createFolder([folderSource]);
+await wait(600);
+await nativeScenario("drag-folder-same-zone-native", folderSource, pinnedB, "pinned");
+
+// Cross-window protected drag is blocked before native adoption/demotion.
+const second = win.OpenBrowserWindow();
+await new Promise(resolve => second.addEventListener("load", resolve, { once: true }));
+const secondReady = Date.now() + 5000;
+while (!second.__svalinn?.hookedWindows?.() && Date.now() < secondReady) {
+  await wait(100);
+}
+const secondPinned = second.gBrowser.addTab("about:blank", {
+  triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
+  inBackground: true,
+});
+await wait(300);
+second.gBrowser.pinTab(secondPinned);
+await wait(300);
+const beforeCross = [...gBrowser.tabs].length;
+await dropTab(secondPinned, normalA);
+check(
+  "drag-cross-window-blocked",
+  second.gBrowser.tabs.includes(secondPinned) &&
+    secondPinned.pinned === true &&
+    [...gBrowser.tabs].length === beforeCross,
+  {
+    sourcePresent: second.gBrowser.tabs.includes(secondPinned),
+    sourcePinned: secondPinned.pinned,
+    targetTabCount: [...gBrowser.tabs].length,
+  }
+);
+second.close();
+await wait(500);
+
+// Duplicate mode is opt-in; the #2 copy path remains available.
+api.setDragBehavior("duplicate");
+await duplicateScenario("drag-duplicate-essential-to-normal", essentialA, normalA, "normal");
+await duplicateScenario("drag-duplicate-pinned-to-normal", pinnedA, normalA, "normal");
+await duplicateScenario("drag-duplicate-pinned-to-essential", pinnedB, essentialB, "essential");
+await duplicateScenario("drag-duplicate-essential-to-pinned", essentialB, pinnedB, "pinned");
 
 const failureSource = await makeTab({ essential: true });
 const beforeFailure = new Set(gBrowser.tabs);
@@ -703,16 +781,19 @@ check(
 const reinstall = await api.install({ enabled: true, waitForStartup: false });
 check(
   "drag-reinstall-after-cancel",
-  reinstall.status === "installed" && api.hookedWindows() >= 1,
-  { status: reinstall.status, hooked: api.hookedWindows() }
+  reinstall.status === "installed" &&
+    api.hookedWindows() >= 1 &&
+    api.dragBehavior() === "block",
+  { status: reinstall.status, hooked: api.hookedWindows(), behavior: api.dragBehavior() }
 );
 
 return {
   results,
   hooked: api.hookedWindows(),
+  behavior: api.dragBehavior(),
   warnings: api.snapshot().warnings,
 };`,
-    { timeoutMs: 60_000 }
+    { timeoutMs: 90_000 }
   );
 }
 
@@ -1256,7 +1337,7 @@ return { display, activeMarker };
 
     phase = "injection";
     const injected = await ensureAdapter(client, 30_000);
-    record("adapter-injected", injected.adapter === "0.4.0" && injected.policy.length >= 4, injected);
+    record("adapter-injected", injected.adapter === "0.5.0" && injected.policy.length >= 4, injected);
 
     const probe = await runAdapter(
       client,
