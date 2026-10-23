@@ -46,9 +46,10 @@ npm run zen:smoke
 
 It launches an isolated profile, injects the adapter, verifies
 normal/Pinned/Essential mapping and all four duplication transitions, checks
-native same-zone/normal-tab behavior and duplication failure safety, restarts
-and verifies session restore, then deletes the profile. It never patches
-`/opt/zen-browser-bin` and never uses `~/.zen`. See
+native same-zone/normal-tab behavior, duplication failure safety, unknown-target
+fail-closed behavior, uninstall during a pending restore, restart/session
+restore, then deletes the profile. It never patches `/opt/zen-browser-bin` and
+never uses `~/.zen`. See
 [`docs/zen-integration.md`](docs/zen-integration.md) for the mechanism, security
 model, and rollback steps.
 

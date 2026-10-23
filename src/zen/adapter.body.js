@@ -22,6 +22,9 @@
     observer: null,
     capabilities: null,
     warnings: [],
+    pending: new Set(),
+    restoredTabs: new WeakSet(),
+    restoreTimeoutMs: 10_000,
   };
 
   function browserWindows() {
@@ -123,22 +126,30 @@
   }
 
   /**
-   * Decide whether this drop should duplicate a protected tab.
-   * Read-only: returns null whenever Zen should keep its native behavior.
+   * Classify a drop before Zen mutates anything.
+   *
+   * - NATIVE: deliberately unsupported or non-protected case; delegate.
+   * - DUPLICATE: protected cross-zone move; copy instead of demoting.
+   * - BLOCK: protected in-scope move whose target/plan cannot be trusted.
    */
-  function planProtectedDrop(win, dnd, event) {
+  function planDrop(win, dnd, event) {
+    let source = null;
     try {
       const dataTransfer = event?.dataTransfer;
-      if (!dataTransfer || dataTransfer.dropEffect !== "move") return null;
+      if (!dataTransfer || dataTransfer.dropEffect !== "move") {
+        return { action: "native" };
+      }
 
       const dropType =
         win.TAB_DROP_TYPE ?? "application/x-moz-tabbrowser-tab";
       const types = dataTransfer.mozTypesAt?.(0);
-      if (!types || types[0] !== dropType) return null;
+      if (!types || types[0] !== dropType) return { action: "native" };
 
-      const source = dataTransfer.mozGetDataAt(dropType, 0);
-      if (!source || source.documentGlobal !== win) return null;
-      if (!win.gBrowser?.isTab?.(source)) return null;
+      source = dataTransfer.mozGetDataAt(dropType, 0);
+      if (!source || source.documentGlobal !== win) {
+        return { action: "native" };
+      }
+      if (!win.gBrowser?.isTab?.(source)) return { action: "native" };
 
       const movingTabs = source._dragData?.movingTabs;
       if (
@@ -146,19 +157,41 @@
         movingTabs.length !== 1 ||
         movingTabs[0] !== source
       ) {
-        return null;
+        return { action: "native" };
       }
+    } catch (error) {
+      return { action: "native" };
+    }
+
+    // From here the drop belongs to a protected-tab lifecycle. If anything is
+    // unclear, fail closed instead of letting native demote the source.
+    try {
+      const flags = readTabFlags(source);
+      if (!isProtected(flags)) return { action: "native" };
 
       const targetZone = zoneFromTarget(event.target);
-      if (!targetZone) return null;
+      if (!targetZone) {
+        return {
+          action: "block",
+          source,
+          reason: "unknown-target",
+        };
+      }
 
       const decision = decideDrop({
-        tab: readTabFlags(source),
+        tab: flags,
         targetZone,
         sameWindow: true,
         locked: true,
       });
-      if (decision !== "duplicate") return null;
+      if (decision === "native") return { action: "native" };
+      if (decision !== "duplicate") {
+        return {
+          action: "block",
+          source,
+          reason: `unsupported-decision:${decision}`,
+        };
+      }
 
       const dropIndex =
         typeof dnd?._getDropIndex === "function"
@@ -170,10 +203,19 @@
           ? elements[dropIndex] ?? null
           : null;
 
-      return { source, targetZone, dropIndex, dropTarget };
+      return {
+        action: "duplicate",
+        source,
+        targetZone,
+        dropIndex,
+        dropTarget,
+      };
     } catch (error) {
-      state.warnings.push(`drop-plan: ${error}`);
-      return null;
+      return {
+        action: "block",
+        source,
+        reason: `planning-error:${error}`,
+      };
     }
   }
 
@@ -208,6 +250,92 @@
     }
   }
 
+  function removePendingCopy(op) {
+    if (op.removed) return;
+    op.removed = true;
+    try {
+      if (op.copy?.isConnected !== false) {
+        op.win?.gBrowser?.removeTab?.(op.copy, { animate: false });
+      }
+    } catch (error) {
+      state.warnings.push(`drop-cleanup: ${error}`);
+    }
+  }
+
+  function settlePending(op, discardReason = null) {
+    if (op.done) return;
+    op.done = true;
+    if (op.timer) clearTimeout(op.timer);
+    state.pending.delete(op);
+
+    if (discardReason) {
+      state.warnings.push(`drop-duplicate: ${discardReason}`);
+      removePendingCopy(op);
+      return;
+    }
+
+    try {
+      const gBrowser = op.win.gBrowser;
+      applyZone(op.copy, op.plan.targetZone, op.win);
+
+      const target =
+        op.plan.dropTarget && op.plan.dropTarget !== op.copy
+          ? op.plan.dropTarget
+          : null;
+
+      if (target) {
+        gBrowser.moveTabsBefore([op.copy], target);
+      } else {
+        const lastIndex = Math.max(0, gBrowser.tabs.length - 1);
+        const elementIndex = Number.isInteger(op.plan.dropIndex)
+          ? Math.min(Math.max(op.plan.dropIndex, 0), lastIndex)
+          : lastIndex;
+        gBrowser.moveTabTo(op.copy, { elementIndex });
+      }
+
+      gBrowser.selectedTab = op.copy;
+    } catch (error) {
+      state.warnings.push(`drop-duplicate: ${error}`);
+      removePendingCopy(op);
+    }
+  }
+
+  function finalizePending(op) {
+    if (op.done) return;
+    if (
+      !state.installed ||
+      !state.enabled ||
+      op.cancelled ||
+      !op.win ||
+      op.win.closed === true
+    ) {
+      settlePending(op, "operation-cancelled");
+      return;
+    }
+    const dnd = op.win?.gBrowser?.tabContainer?.tabDragAndDrop;
+    if (!dnd?.[DROP_HOOK]) {
+      settlePending(op, "hook-inactive");
+      return;
+    }
+    settlePending(op);
+  }
+
+  function cancelPending(op, reason) {
+    if (op.done || op.cancelled) return;
+    op.cancelled = true;
+    settlePending(op, reason);
+  }
+
+  function cancelPendingForWindow(win, reason) {
+    for (const op of [...state.pending]) {
+      if (op.win === win) cancelPending(op, reason);
+    }
+  }
+
+  function cancelAllPending(reason) {
+    for (const op of [...state.pending]) cancelPending(op, reason);
+  }
+
   function duplicateTabForDrop(win, dnd, plan) {
     const gBrowser = win.gBrowser;
     let copy = null;
@@ -223,70 +351,26 @@
       return null;
     }
 
-    let finished = false;
-    const discard = reason => {
-      state.warnings.push(`drop-duplicate: ${reason}`);
-      try {
-        gBrowser.removeTab(copy, { animate: false });
-      } catch (cleanupError) {
-        state.warnings.push(`drop-cleanup: ${cleanupError}`);
-      }
+    const op = {
+      win,
+      copy,
+      plan,
+      done: false,
+      cancelled: false,
+      removed: false,
+      timer: null,
     };
+    state.pending.add(op);
+    op.timer = setTimeout(() => {
+      cancelPending(op, "restore-timeout");
+    }, state.restoreTimeoutMs);
 
-    const finalize = () => {
-      if (finished) return;
-      finished = true;
-      try {
-        applyZone(copy, plan.targetZone, win);
-
-        const target =
-          plan.dropTarget && plan.dropTarget !== copy
-            ? plan.dropTarget
-            : null;
-
-        if (target) {
-          gBrowser.moveTabsBefore([copy], target);
-        } else {
-          const lastIndex = Math.max(0, gBrowser.tabs.length - 1);
-          const elementIndex = Number.isInteger(plan.dropIndex)
-            ? Math.min(Math.max(plan.dropIndex, 0), lastIndex)
-            : lastIndex;
-          gBrowser.moveTabTo(copy, { elementIndex });
-        }
-
-        gBrowser.selectedTab = copy;
-      } catch (error) {
-        discard(error);
-      }
-    };
-
-    if (typeof copy.addEventListener === "function") {
-      copy.addEventListener("SSTabRestored", finalize, { once: true });
+    // A synchronous restore can dispatch SSTabRestored before duplicateTab
+    // returns. The window listener records that, so this branch is safe.
+    if (state.restoredTabs.has(copy)) {
+      finalizePending(op);
     }
 
-    if (copy.id) {
-      finalize();
-      return copy;
-    }
-
-    // SessionStore restores duplicated tabs asynchronously and overwrites
-    // their category while doing so. Apply the requested zone only after the
-    // tab has an id; otherwise the copy can silently fall back to Normal.
-    const deadline = Date.now() + 10_000;
-    const poll = () => {
-      if (finished) return;
-      if (copy.id) {
-        finalize();
-        return;
-      }
-      if (Date.now() >= deadline) {
-        finished = true;
-        discard("restore-timeout");
-        return;
-      }
-      setTimeout(poll, 50);
-    };
-    setTimeout(poll, 50);
     return copy;
   }
 
@@ -318,13 +402,37 @@
     if (dnd[DROP_HOOK]) return true;
 
     const original = dnd.handle_drop;
+    const restoredListener = event => {
+      const tab = event?.target;
+      if (!tab) return;
+      state.restoredTabs.add(tab);
+      for (const op of [...state.pending]) {
+        if (op.win === win && op.copy === tab) finalizePending(op);
+      }
+    };
+    const unloadListener = () => {
+      cancelPendingForWindow(win, "window-unloaded");
+      detachWindow(win);
+    };
+
+    try {
+      win.addEventListener("SSTabRestored", restoredListener, true);
+      win.addEventListener("unload", unloadListener, { once: true });
+    } catch (error) {
+      state.warnings.push(`drop-restore-listener: ${error}`);
+      try {
+        win.removeEventListener("SSTabRestored", restoredListener, true);
+      } catch {}
+      return false;
+    }
+
     const patched = function (event) {
       if (!state.installed || !state.enabled) {
         return original.call(this, event);
       }
 
-      const plan = planProtectedDrop(win, this, event);
-      if (!plan) {
+      const plan = planDrop(win, this, event);
+      if (plan.action === "native") {
         return original.call(this, event);
       }
 
@@ -335,13 +443,18 @@
         state.warnings.push(`drop-event: ${error}`);
       }
 
-      duplicateTabForDrop(win, this, plan);
+      if (plan.action === "duplicate") {
+        duplicateTabForDrop(win, this, plan);
+      } else {
+        state.warnings.push(`drop-blocked:${plan.reason ?? "unsafe"}`);
+      }
+
       cleanupAfterProtectedDrop(this, plan.source);
       return undefined;
     };
 
     Object.defineProperty(dnd, DROP_HOOK, {
-      value: { original, patched },
+      value: { original, patched, restoredListener, unloadListener },
       configurable: true,
       writable: false,
       enumerable: false,
@@ -354,7 +467,18 @@
     const dnd = win?.gBrowser?.tabContainer?.tabDragAndDrop;
     const hook = dnd?.[DROP_HOOK];
     if (!hook) return;
+    cancelPendingForWindow(win, "window-detached");
     try {
+      if (hook.restoredListener) {
+        win.removeEventListener(
+          "SSTabRestored",
+          hook.restoredListener,
+          true
+        );
+      }
+      if (hook.unloadListener) {
+        win.removeEventListener("unload", hook.unloadListener);
+      }
       dnd.handle_drop = hook.original;
       delete dnd[DROP_HOOK];
     } catch (error) {
@@ -441,6 +565,7 @@
       installed: state.installed,
       enabled: state.enabled,
       windows: state.windows.size,
+      pending: state.pending.size,
       capabilities: state.capabilities,
       warnings: [...state.warnings],
       ...extra,
@@ -458,6 +583,7 @@
       enabled,
       waitForStartup = true,
       timeoutMs = 30_000,
+      restoreTimeoutMs = 10_000,
       allowUnverifiedVersion = false,
     } = options;
 
@@ -467,7 +593,10 @@
 
     state.enabled = enabled ?? prefEnabled();
     state.capabilities = null;
+    state.restoreTimeoutMs = restoreTimeoutMs;
     state.warnings.length = 0;
+    cancelAllPending("reinstall");
+    state.restoredTabs = new WeakSet();
 
     if (!state.enabled) {
       return report("disabled", { changedTabs: false });
@@ -523,6 +652,7 @@
   }
 
   function uninstall() {
+    cancelAllPending("uninstall");
     removeWindowObserver();
     for (const win of [...state.windows]) detachWindow(win);
     state.windows.clear();
@@ -549,7 +679,12 @@
       enabled: state.enabled,
       windows,
       warnings: [...state.warnings],
+      pending: state.pending.size,
     };
+  }
+
+  function pendingDuplications() {
+    return state.pending.size;
   }
 
   function hookedWindows() {
@@ -571,6 +706,7 @@
     setEnabled,
     snapshot,
     hookedWindows,
+    pendingDuplications,
     classify,
     policy: {
       ZONES,

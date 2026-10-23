@@ -142,12 +142,20 @@ How it works:
    source is protected and the target section is a different zone.
 3. The native drop handler is skipped, so Zen never calls `removeEssentials` or
    `gBrowser.unpinTab` on the protected source.
-4. The tab is duplicated, then its zone is applied **after** SessionStore
-   restores the duplicate. This is important: duplicated tabs are restored
-   asynchronously and can overwrite an early category change.
-5. The copy is positioned and selected. If duplication, category application, or
-   restore fails, the copy is removed and the source is left untouched.
-6. Same-zone reordering, normal tabs, multi-selected tabs, and cross-window drags
+4. The tab is duplicated, then its zone is applied **after** the
+   `SSTabRestored` event. This is important: duplicated tabs are restored
+   asynchronously and can overwrite an early category change. A nonempty tab id
+   is deliberately not treated as proof of restoration.
+5. Pending duplication operations are tracked per window. `uninstall()`,
+   `setEnabled(false)`, and window detach cancel the restore listener/timer and
+   remove any not-yet-finalized copy without touching the source.
+6. The copy is positioned and selected. If duplication, category application, or
+   restore fails or times out, the copy is removed and the source is left
+   untouched.
+7. If a protected same-window single-tab drop has an unknown target or a
+   planning error, the drop is consumed and the source is preserved. Zen's
+   native demotion handler is not called.
+8. Same-zone reordering, normal tabs, multi-selected tabs, and cross-window drags
    fall through to Zen's native handler.
 
 The guard is restored on `Svalinn.uninstall()` or when the browser exits.
@@ -182,10 +190,11 @@ await Svalinn.install({ enabled: true, waitForStartup: true, timeoutMs: 30000 })
 // { status: "installed" | "unsupported" | "disabled" | "not-ready" | "already-installed", ... }
 
 Svalinn.snapshot();
-// { adapter, installed, enabled, warnings,
+// { adapter, installed, enabled, warnings, pending,
 //   windows: [{ ready, hasManager, hooked, tabCount, tabs }] }
 
 Svalinn.hookedWindows(); // number of windows with the drop guard installed
+Svalinn.pendingDuplications(); // restore operations waiting for SSTabRestored
 Svalinn.uninstall(); // { status: "uninstalled", changedTabs: false }
 Svalinn.classify(tab); // { zone: "essential" | "pinned" | "normal", ... }
 ```
@@ -242,15 +251,19 @@ npm run zen:smoke
   unverified versions
 - adapter behaviour in a VM: opt-in/disabled mode, idempotent install, clean
   uninstall, startup timeouts, multi-window snapshots and observer attachment,
-  cross-zone duplication, native reordering, lazy SessionStore restoration,
-  duplication failures, Essential rejection, and no source-tab mutation
+  cross-zone duplication, native reordering, event-driven lazy SessionStore
+  restoration (including a nonempty-id false signal), restore timeout, unknown
+  and throwing targets, planning errors, uninstall cancellation, duplication
+  failures, Essential rejection, and no source-tab mutation
 - injection bundling and Marionette framing/error handling
 
 `npm run zen:smoke` is the integration check against a real Zen process. It
 covers startup, capability probing, install/uninstall, all four cross-zone
 transitions, same-zone and normal-tab dragging, deletion-safe failure paths,
-`about:config` duplication, multi-window attachment, restart/session restore,
-and shutdown. It is not part of `npm test` because it launches a browser.
+`about:config` duplication, an unknown-target negative control, delayed-restore
+cancellation by uninstall, reinstall after cancellation, multi-window
+attachment, restart/session restore, and shutdown. It is not part of `npm test`
+because it launches a browser.
 
 ## Known limitations
 
@@ -259,8 +272,12 @@ and shutdown. It is not part of `npm test` because it launches a browser.
 - Close, unpin, and Essential-removal interception is not implemented yet.
 - Cross-zone duplication is limited to a single tab in one window. Multi-selected
   tabs, cross-window drags, folders, tab groups, and split views stay native.
-- Duplication waits for SessionStore to restore the copy (bounded to 10 seconds).
-  If restoration does not complete, the copy is removed and the source is kept.
+- Duplication waits for the SessionStore `SSTabRestored` event (bounded to 10
+  seconds). If restoration does not complete, the copy is removed and the source
+  is kept. Uninstalling cancels pending restoration work and removes unfinished
+  copies.
+- Protected drops with an unknown target or an unsafe planning result are
+  consumed rather than delegated to Zen's native demotion path.
 - The copy preserves the current URL and container, but not full back/forward
   history.
 - The smoke test creates local `file://` tabs; session restore is verified for

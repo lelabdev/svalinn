@@ -294,6 +294,24 @@ function makeDropEnvironment() {
   };
   const tabs = [];
   const win = {};
+  const listeners = new Map();
+  const addEventListener = (type, listener) => {
+    const entries = listeners.get(type) ?? [];
+    entries.push(listener);
+    listeners.set(type, entries);
+  };
+  const removeEventListener = (type, listener) => {
+    const entries = listeners.get(type) ?? [];
+    const index = entries.indexOf(listener);
+    if (index !== -1) entries.splice(index, 1);
+  };
+  const dispatchEvent = event => {
+    for (const listener of listeners.get(event.type) ?? []) listener(event);
+    return true;
+  };
+  const emitRestored = tab => {
+    win.dispatchEvent({ type: "SSTabRestored", target: tab });
+  };
 
   const gBrowser = {
     tabs,
@@ -313,9 +331,22 @@ function makeDropEnvironment() {
         essential: source.hasAttribute("zen-essential"),
       });
       copy.documentGlobal = win;
+      tabs.push(copy);
+
+      if (stats.lazyDuplicate === "never") {
+        return copy;
+      }
+      if (stats.lazyDuplicate === "with-id") {
+        // Nonempty id is not a restoration signal; the zone is reset when the
+        // simulated SessionStore restore finishes and SSTabRestored fires.
+        setTimeout(() => {
+          copy.pinned = false;
+          copy.removeAttribute("zen-essential");
+          emitRestored(copy);
+        }, 25);
+        return copy;
+      }
       if (stats.lazyDuplicate) {
-        // SessionStore duplicates are restored asynchronously and initially
-        // look like normal tabs, overwriting any category set too early.
         copy.id = "";
         copy.pinned = false;
         copy.removeAttribute("zen-essential");
@@ -323,9 +354,12 @@ function makeDropEnvironment() {
           copy.id = `restored-${stats.duplicateCalls}`;
           copy.pinned = false;
           copy.removeAttribute("zen-essential");
+          emitRestored(copy);
         }, 25);
+        return copy;
       }
-      tabs.push(copy);
+
+      emitRestored(copy);
       return copy;
     },
     removeTab(tab) {
@@ -385,7 +419,9 @@ function makeDropEnvironment() {
     SessionStore: { promiseAllWindowsRestored: Promise.resolve() },
     delayedStartupPromise: Promise.resolve(),
     TAB_DROP_TYPE: "application/x-moz-tabbrowser-tab",
-    addEventListener() {},
+    addEventListener,
+    removeEventListener,
+    dispatchEvent,
   });
 
   const addTab = (url, options) => {
@@ -405,6 +441,10 @@ function makeDropEnvironment() {
     drop(event, targetSelector = "normal") {
       const target = {
         closest: selector => {
+          if (targetSelector === "unknown") return null;
+          if (targetSelector === "throws") {
+            throw new Error("closest failed");
+          }
           if (selector === ".zen-essentials-container") {
             return targetSelector === "essential" ? {} : null;
           }
@@ -431,10 +471,10 @@ function makeDropEnvironment() {
   };
 }
 
-async function installDropEnvironment() {
+async function installDropEnvironment(options = {}) {
   const env = makeDropEnvironment();
   const { api } = await makeContext({ windows: [env.win] });
-  const report = await api.install({ enabled: true });
+  const report = await api.install({ enabled: true, ...options });
   assert.equal(report.status, "installed");
   return { ...env, api };
 }
@@ -467,6 +507,53 @@ test("cross-zone drops duplicate and preserve the protected source", async () =>
   }
 });
 
+test("unrecognized or unsafe protected targets are blocked, not native", async () => {
+  for (const mode of ["unknown", "throws"]) {
+    const env = await installDropEnvironment();
+    const source = env.addTab("https://essential.test", {
+      pinned: true,
+      essential: true,
+    });
+    source._dragData = { movingTabs: [source] };
+    const before = env.tabs.length;
+
+    assert.doesNotThrow(() => env.drop({ source }, mode));
+
+    assert.equal(env.stats.nativeDrops, 0, mode);
+    assert.equal(env.stats.duplicateCalls, 0, mode);
+    assert.equal(env.tabs.length, before, mode);
+    assert.equal(env.api.classify(source).zone, "essential", mode);
+    assert.equal(env.api.pendingDuplications(), 0, mode);
+  }
+});
+
+test("protected planning errors fail closed without native demotion", async () => {
+  const env = await installDropEnvironment();
+  const source = env.addTab("https://pinned.test", { pinned: true });
+  source._dragData = { movingTabs: [source] };
+  env.dnd._getDropIndex = () => {
+    throw new Error("drop index failed");
+  };
+
+  env.drop({ source }, "normal");
+
+  assert.equal(env.stats.nativeDrops, 0);
+  assert.equal(env.stats.duplicateCalls, 0);
+  assert.equal(env.tabs.length, 1);
+  assert.equal(env.api.classify(source).zone, "pinned");
+});
+
+test("normal sources still use native behavior for unknown targets", async () => {
+  const env = await installDropEnvironment();
+  const source = env.addTab("https://normal.test");
+  source._dragData = { movingTabs: [source] };
+
+  env.drop({ source }, "unknown");
+
+  assert.equal(env.stats.nativeDrops, 1);
+  assert.equal(env.stats.duplicateCalls, 0);
+});
+
 test("applies the destination zone after lazy SessionStore restore", async () => {
   const env = await installDropEnvironment();
   env.stats.lazyDuplicate = true;
@@ -486,6 +573,95 @@ test("applies the destination zone after lazy SessionStore restore", async () =>
   assert.equal(env.api.classify(copy).zone, "essential");
   assert.equal(env.api.classify(source).zone, "pinned");
   assert.equal(env.stats.nativeDrops, 0);
+  assert.equal(env.api.pendingDuplications(), 0);
+});
+
+test("does not treat a nonempty id as proof of restoration", async () => {
+  const env = await installDropEnvironment();
+  env.stats.lazyDuplicate = "with-id";
+  const source = env.addTab("https://pinned.test", { pinned: true });
+  const target = env.addTab("https://essential.test", {
+    pinned: true,
+    essential: true,
+  });
+  source._dragData = { movingTabs: [source] };
+
+  env.drop({ source }, "essential");
+  assert.equal(env.api.pendingDuplications(), 1);
+  assert.equal(env.api.classify(source).zone, "pinned");
+
+  await new Promise(resolve => setTimeout(resolve, 200));
+
+  const copy = env.tabs.find(tab => tab !== source && tab !== target);
+  assert.ok(copy);
+  assert.equal(env.api.classify(copy).zone, "essential");
+  assert.equal(env.api.classify(source).zone, "pinned");
+  assert.equal(env.api.pendingDuplications(), 0);
+});
+
+test("restore timeout removes the pending copy and keeps the source", async () => {
+  const env = await installDropEnvironment({ restoreTimeoutMs: 20 });
+  env.stats.lazyDuplicate = "never";
+  const source = env.addTab("https://pinned.test", { pinned: true });
+  source._dragData = { movingTabs: [source] };
+
+  env.drop({ source }, "essential");
+  assert.equal(env.api.pendingDuplications(), 1);
+  await new Promise(resolve => setTimeout(resolve, 100));
+
+  assert.equal(env.api.pendingDuplications(), 0);
+  assert.equal(env.tabs.length, 1);
+  assert.equal(env.api.classify(source).zone, "pinned");
+});
+
+test("uninstall cancels pending restoration before it can mutate tabs", async () => {
+  const env = await installDropEnvironment();
+  env.stats.lazyDuplicate = true;
+  const source = env.addTab("https://pinned.test", { pinned: true });
+  source._dragData = { movingTabs: [source] };
+
+  env.drop({ source }, "essential");
+  assert.equal(env.api.pendingDuplications(), 1);
+
+  const report = env.api.uninstall();
+  assert.equal(report.status, "uninstalled");
+  assert.equal(env.api.pendingDuplications(), 0);
+  assert.equal(env.dnd.handle_drop, env.nativeDrop);
+  assert.equal(env.tabs.length, 1);
+  assert.equal(env.api.classify(source).zone, "pinned");
+
+  // Late restoration must not resurrect, move, select or recategorize a tab.
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(env.tabs.length, 1);
+  assert.equal(env.api.classify(source).zone, "pinned");
+  assert.equal(env.api.pendingDuplications(), 0);
+
+  const reinstall = await env.api.install({ enabled: true });
+  assert.equal(reinstall.status, "installed");
+  assert.equal(env.api.hookedWindows(), 1);
+  assert.equal(env.dnd.handle_drop === env.nativeDrop, false);
+});
+
+test("window unload cancels pending restoration and detaches hooks", async () => {
+  const env = await installDropEnvironment();
+  env.stats.lazyDuplicate = true;
+  const source = env.addTab("https://pinned.test", { pinned: true });
+  source._dragData = { movingTabs: [source] };
+
+  env.drop({ source }, "essential");
+  assert.equal(env.api.pendingDuplications(), 1);
+
+  env.win.dispatchEvent({ type: "unload", target: env.win });
+
+  assert.equal(env.api.pendingDuplications(), 0);
+  assert.equal(env.api.hookedWindows(), 0);
+  assert.equal(env.dnd.handle_drop, env.nativeDrop);
+  assert.equal(env.tabs.length, 1);
+  assert.equal(env.api.classify(source).zone, "pinned");
+
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(env.tabs.length, 1);
+  assert.equal(env.api.classify(source).zone, "pinned");
 });
 
 test("same-zone reordering and normal-tab drops stay native", async () => {

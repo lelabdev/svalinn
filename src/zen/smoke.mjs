@@ -502,6 +502,11 @@ const makeTab = async ({ pinned = false, essential = false, url = null } = {}) =
 };
 
 const dropTab = async (source, target) => {
+  dispatchDrop(source, target);
+  await wait(250);
+};
+
+const dispatchDrop = (source, target) => {
   source._dragData = {
     movingTabs: [source],
     movingTabsSet: new Set([source]),
@@ -521,11 +526,10 @@ const dropTab = async (source, target) => {
     bubbles: true,
     cancelable: true,
     dataTransfer,
-    screenX: target.screenX + rect.width / 2,
-    screenY: target.screenY + rect.height / 2 + 2,
+    screenX: (target.screenX ?? rect.left) + rect.width / 2,
+    screenY: (target.screenY ?? rect.top) + rect.height / 2 + 2,
   });
   target.dispatchEvent(event);
-  await wait(250);
 };
 
 const results = [];
@@ -643,6 +647,55 @@ check(
     sourceZone: zone(internal),
     copyZone: afterInternal[0] ? zone(afterInternal[0]) : null,
   }
+);
+
+const unknownSource = await makeTab({ essential: true });
+const beforeUnknown = new Set(gBrowser.tabs);
+await dropTab(unknownSource, gBrowser.tabContainer);
+const afterUnknown = addedSince(beforeUnknown);
+check(
+  "drag-unknown-target-blocked",
+  afterUnknown.length === 0 && zone(unknownSource) === "essential",
+  {
+    added: afterUnknown.length,
+    sourceZone: zone(unknownSource),
+    expectedSourceZone: "essential",
+    blocked: api.snapshot().warnings.some(w =>
+      w.includes("drop-blocked:unknown-target")
+    ),
+  }
+);
+
+const cancelSource = await makeTab({ essential: true });
+const beforeCancel = new Set(gBrowser.tabs);
+dispatchDrop(cancelSource, normalA);
+const pendingBeforeUninstall = api.pendingDuplications();
+const uninstallReport = api.uninstall();
+await wait(600);
+const afterCancel = addedSince(beforeCancel);
+check(
+  "drag-uninstall-cancels-pending",
+  pendingBeforeUninstall >= 1 &&
+    uninstallReport.status === "uninstalled" &&
+    afterCancel.length === 0 &&
+    zone(cancelSource) === "essential" &&
+    api.pendingDuplications() === 0 &&
+    api.hookedWindows() === 0,
+  {
+    pendingBeforeUninstall,
+    status: uninstallReport.status,
+    added: afterCancel.length,
+    sourceZone: zone(cancelSource),
+    pendingAfter: api.pendingDuplications(),
+    hookedAfter: api.hookedWindows(),
+  }
+);
+
+const reinstall = await api.install({ enabled: true, waitForStartup: false });
+check(
+  "drag-reinstall-after-cancel",
+  reinstall.status === "installed" && api.hookedWindows() >= 1,
+  { status: reinstall.status, hooked: api.hookedWindows() }
 );
 
 return {
