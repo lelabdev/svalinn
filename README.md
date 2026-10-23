@@ -7,12 +7,12 @@
 | Operation | Locked behavior |
 | --- | --- |
 | Close an Essential or Pinned (X, middle click, Ctrl+W, context menu) | Block |
-| Remove from Essentials / Unpin | Block |
+| Remove from Essentials / Unpin | Blocked by default; explicit per-tab command allows one action |
 | Drag protected tab to another category | Duplicate into target; preserve original |
 | Drag protected tab to another window | Duplicate; preserve original |
 | Reorder within its own category | Allow |
 | Unload protected tab | Allow |
-| Explicit temporary unlock | Allow intentional removal and movement |
+| Explicit per-tab Unpin / Remove from Essentials command | Allow that one intentional action; no timer or global unlock |
 | Normal tabs | Keep Zen's native behavior |
 
 ## Current status
