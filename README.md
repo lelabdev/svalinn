@@ -17,34 +17,45 @@
 
 ## Current status
 
-**Integration grounded and smoke-tested — enforcement not implemented yet.**
+**Cross-zone duplication implemented and smoke-tested — close prevention not implemented yet.**
 
 - `src/policy.mjs`: dependency-free, testable protection rules.
-- `tests/`: policy regression tests plus adapter, capability, bundling, and
-  protocol tests. Run with `npm test`.
-- `src/zen/`: privileged, read-only adapter and Marionette smoke harness.
+- `tests/`: policy regression tests plus adapter, capability, drop-guard,
+  bundling, and protocol tests. Run with `npm test`.
+- `src/zen/`: privileged adapter with a cross-zone drop guard and Marionette
+  smoke harness.
 - `userChrome.css`: visual draft; **does not protect against keyboard, drag/drop, or native tab removal**.
 - `assets/icon.svg`: earlier provisional icon, not yet approved as final.
 
 Observed on **Zen 1.23.4b** (TufTux, Arch Linux): `ZenPinnedTabManager.mjs` includes `removeEssentials`, `addToEssentials`, `onCloseTabShortcut`, and `moveToAnotherTabContainerIfNecessary`. Dragging a Pinned to normal invokes `gBrowser.unpinTab`.
 
-Zen Mods are CSS-only. A true guard requires a privileged integration with browser chrome. Issue #1 validates a Marionette chrome-context harness against a disposable profile:
+Zen Mods are CSS-only. A true guard requires a privileged integration with browser chrome. The adapter now guards the tab strip's drop handler against cross-zone demotion for a single tab in one window:
+
+| Source | Target | Result |
+| --- | --- | --- |
+| Essential | Normal / Pinned | Duplicate into target; keep Essential |
+| Pinned | Normal / Essential | Duplicate into target; keep Pinned |
+| Protected | Same category | Native reorder |
+| Normal | Any category | Native behavior |
+
+The smoke harness validates the transitions in a disposable profile:
 
 ```bash
 npm run zen:smoke
 ```
 
-The command launches an isolated profile, injects a read-only adapter, verifies
-normal/Pinned/Essential mapping, restart/session restore, disabled mode, and
-clean uninstall, then deletes the profile. It never patches
+It launches an isolated profile, injects the adapter, verifies
+normal/Pinned/Essential mapping and all four duplication transitions, checks
+native same-zone/normal-tab behavior and duplication failure safety, restarts
+and verifies session restore, then deletes the profile. It never patches
 `/opt/zen-browser-bin` and never uses `~/.zen`. See
 [`docs/zen-integration.md`](docs/zen-integration.md) for the mechanism, security
 model, and rollback steps.
 
 ## Next tasks
 
-1. Build a privileged browser adapter applying the policy *before* close, unpin, and Essential removal; ensure explicit unlock, browser exit and session recovery continue working.
-2. Implement copy-on-drop at the pre-move boundary, with container, workspace, cross-window and multi-selected tab cases.
+1. Build close/unpin/Essential-removal interception; ensure explicit unlock, browser exit and session recovery continue working.
+2. Extend pre-move duplication to multi-selected, cross-window, folder, tab-group and split-view cases.
 3. Choose and document a maintainable deployment path for the adapter (the smoke harness is not a user installation), then test in a disposable Zen profile and verify Zen update compatibility before enabling in the main profile.
 
 **Safety:** do not patch `/opt/zen-browser-bin` or enable experimental scripts in the daily profile during development.

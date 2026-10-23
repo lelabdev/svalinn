@@ -469,6 +469,191 @@ return {
   );
 }
 
+async function runDropScenarios(client, urls) {
+  return runScript(
+    client,
+    `
+const win = [...Services.wm.getEnumerator("navigator:browser")][0];
+const api = globalThis.Svalinn;
+const gBrowser = win.gBrowser;
+const manager = win.gZenPinnedTabManager;
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+const zone = tab =>
+  tab.hasAttribute("zen-essential")
+    ? "essential"
+    : tab.pinned
+      ? "pinned"
+      : "normal";
+const principal = Services.scriptSecurityManager.getSystemPrincipal();
+const base = ${JSON.stringify(urls.normal)};
+let seq = 0;
+
+const makeTab = async ({ pinned = false, essential = false, url = null } = {}) => {
+  const tab = gBrowser.addTab(url ?? base + "#drop-" + ++seq, {
+    triggeringPrincipal: principal,
+    inBackground: true,
+  });
+  await wait(80);
+  if (pinned || essential) gBrowser.pinTab(tab);
+  await wait(60);
+  if (essential) manager.addToEssentials(tab);
+  await wait(120);
+  return tab;
+};
+
+const dropTab = async (source, target) => {
+  source._dragData = {
+    movingTabs: [source],
+    movingTabsSet: new Set([source]),
+    fromTabList: false,
+    dropElement: target,
+    dropBefore: true,
+    translateX: (target.screenX ?? 0) - (source.screenX ?? 0),
+    translateY: (target.screenY ?? 0) - (source.screenY ?? 0),
+    tabWidth: source.getBoundingClientRect().width || 200,
+    tabHeight: source.getBoundingClientRect().height || 30,
+  };
+  const dataTransfer = new win.DataTransfer();
+  dataTransfer.mozSetDataAt(win.TAB_DROP_TYPE, source, 0);
+  dataTransfer.dropEffect = "move";
+  const rect = target.getBoundingClientRect();
+  const event = new win.DragEvent("drop", {
+    bubbles: true,
+    cancelable: true,
+    dataTransfer,
+    screenX: target.screenX + rect.width / 2,
+    screenY: target.screenY + rect.height / 2 + 2,
+  });
+  target.dispatchEvent(event);
+  await wait(250);
+};
+
+const results = [];
+const check = (name, ok, details) => results.push({ name, ok, details });
+const addedSince = before => [...gBrowser.tabs].filter(tab => !before.has(tab));
+
+const duplicateScenario = async (name, source, target, expectedZone) => {
+  const before = new Set(gBrowser.tabs);
+  const sourceZone = zone(source);
+  await dropTab(source, target);
+  const deadline = Date.now() + 8000;
+  let added = addedSince(before);
+  while (
+    Date.now() < deadline &&
+    !(added.length === 1 && zone(added[0]) === expectedZone && added[0].selected)
+  ) {
+    await wait(50);
+    added = addedSince(before);
+  }
+  check(
+    name,
+    added.length === 1 &&
+      zone(source) === sourceZone &&
+      zone(added[0]) === expectedZone &&
+      added[0].selected === true &&
+      (added[0].userContextId ?? 0) === (source.userContextId ?? 0),
+    {
+      added: added.length,
+      sourceZone: zone(source),
+      expectedSourceZone: sourceZone,
+      copyZone: added[0] ? zone(added[0]) : null,
+      expectedCopyZone: expectedZone,
+      copySelected: added[0] ? added[0].selected : null,
+      targetZone: zone(target),
+      sourceUserContextId: source.userContextId ?? 0,
+      copyUserContextId: added[0]?.userContextId ?? 0,
+    }
+  );
+};
+
+const nativeScenario = async (name, source, target, expectedSourceZone) => {
+  const before = new Set(gBrowser.tabs);
+  await dropTab(source, target);
+  const added = addedSince(before);
+  check(
+    name,
+    added.length === 0 && zone(source) === expectedSourceZone,
+    {
+      added: added.length,
+      sourceZone: zone(source),
+      expectedSourceZone,
+    }
+  );
+};
+
+const normalA = await makeTab({ pinned: false });
+const normalB = await makeTab({ pinned: false });
+const pinnedA = await makeTab({ pinned: true });
+const pinnedB = await makeTab({ pinned: true });
+const essentialA = await makeTab({ essential: true });
+const essentialB = await makeTab({ essential: true });
+
+await duplicateScenario("drag-essential-to-normal", essentialA, normalA, "normal");
+await duplicateScenario("drag-pinned-to-normal", pinnedA, normalA, "normal");
+await duplicateScenario("drag-pinned-to-essential", pinnedB, essentialB, "essential");
+await duplicateScenario("drag-essential-to-pinned", essentialB, pinnedB, "pinned");
+await nativeScenario("drag-same-zone-native", pinnedA, pinnedB, "pinned");
+await nativeScenario("drag-normal-native", normalB, pinnedB, "pinned");
+
+const failureSource = await makeTab({ essential: true });
+const beforeFailure = new Set(gBrowser.tabs);
+const originalDuplicate = gBrowser.duplicateTab;
+gBrowser.duplicateTab = () => {
+  throw new Error("synthetic duplication failure");
+};
+try {
+  await dropTab(failureSource, normalA);
+} finally {
+  gBrowser.duplicateTab = originalDuplicate;
+}
+const afterFailure = addedSince(beforeFailure);
+check(
+  "drag-duplication-failure",
+  afterFailure.length === 0 && zone(failureSource) === "essential",
+  {
+    added: afterFailure.length,
+    sourceZone: zone(failureSource),
+    expectedSourceZone: "essential",
+  }
+);
+
+const internal = await makeTab({ essential: true, url: "about:config" });
+const beforeInternal = new Set(gBrowser.tabs);
+await dropTab(internal, normalA);
+let afterInternal = addedSince(beforeInternal);
+const internalDeadline = Date.now() + 8000;
+while (
+  Date.now() < internalDeadline &&
+  !(
+    afterInternal.length <= 1 &&
+    zone(internal) === "essential" &&
+    (afterInternal.length === 0 || zone(afterInternal[0]) === "normal")
+  )
+) {
+  await wait(50);
+  afterInternal = addedSince(beforeInternal);
+}
+check(
+  "drag-internal-page",
+  afterInternal.length <= 1 &&
+    zone(internal) === "essential" &&
+    (afterInternal.length === 0 || zone(afterInternal[0]) === "normal"),
+  {
+    added: afterInternal.length,
+    sourceZone: zone(internal),
+    copyZone: afterInternal[0] ? zone(afterInternal[0]) : null,
+  }
+);
+
+return {
+  results,
+  hooked: api.hookedWindows(),
+  warnings: api.snapshot().warnings,
+};`,
+    { timeoutMs: 60_000 }
+  );
+}
+
 function zoneMap(snapshot, urls) {
   const byUrl = new Map();
   for (const win of snapshot?.windows ?? []) {
@@ -587,7 +772,7 @@ export async function runSmoke(options) {
 
     phase = "injection";
     const injected = await ensureAdapter(client, 30_000);
-    record("adapter-injected", injected.adapter === "0.1.0" && injected.policy.length >= 4, injected);
+    record("adapter-injected", injected.adapter === "0.2.0" && injected.policy.length >= 4, injected);
 
     const probe = await runAdapter(
       client,
@@ -602,6 +787,19 @@ export async function runSmoke(options) {
     );
     record("adapter-installed", installed.status === "installed" && installed.changedTabs === false, installed);
 
+    const hookState = await runAdapter(
+      client,
+      `return {
+        count: api.hookedWindows(),
+        windows: api.snapshot().windows.map(window => window.hooked),
+      };`
+    );
+    record(
+      "drop-hook-installed",
+      hookState.count >= 1 && hookState.windows.every(Boolean),
+      hookState
+    );
+
     phase = "tabs";
     const created = await createSmokeTabs(client, profileInfo.urls);
     const snapshot = await runAdapter(client, `return api.snapshot();`);
@@ -609,7 +807,22 @@ export async function runSmoke(options) {
     const zoneProblems = expectZoneMap(zones, profileInfo.urls);
     record("tab-zones", zoneProblems.length === 0, { zones, problems: zoneProblems, created: created.tabs });
 
-    const before = fingerprint(snapshot);
+    phase = "drag-drop";
+    const drops = await runDropScenarios(client, profileInfo.urls);
+    for (const result of drops.results) {
+      record(result.name, result.ok, result.details);
+    }
+    record("drag-drop-hooks-intact", drops.hooked >= 1, { hooked: drops.hooked });
+
+    const afterDropSnapshot = await runAdapter(client, `return api.snapshot();`);
+    const afterDropZones = zoneMap(afterDropSnapshot, profileInfo.urls);
+    record(
+      "tab-zones-after-drag",
+      expectZoneMap(afterDropZones, profileInfo.urls).length === 0,
+      { zones: afterDropZones }
+    );
+
+    const before = fingerprint(afterDropSnapshot);
     const reinstalled = await runAdapter(client, `return await api.install({ enabled: true });`);
     const afterReinstall = fingerprint(await runAdapter(client, `return api.snapshot();`));
     record(
@@ -624,14 +837,19 @@ export async function runSmoke(options) {
     const markerState = await runScript(
       client,
       `const win = [...Services.wm.getEnumerator("navigator:browser")][0];
-       return { attached: Boolean(win.__svalinn), installed: globalThis.Svalinn.snapshot().installed };`
+       return {
+         attached: Boolean(win.__svalinn),
+         installed: globalThis.Svalinn.snapshot().installed,
+         hooked: globalThis.Svalinn.hookedWindows(),
+       };`
     );
     record(
       "uninstall-clean",
       uninstalled.status === "uninstalled" &&
         afterUninstall === before &&
         markerState.attached === false &&
-        markerState.installed === false,
+        markerState.installed === false &&
+        markerState.hooked === 0,
       { status: uninstalled.status, tabsChanged: afterUninstall !== before, markerState }
     );
 
@@ -640,13 +858,18 @@ export async function runSmoke(options) {
     const disabledMarker = await runScript(
       client,
       `const win = [...Services.wm.getEnumerator("navigator:browser")][0];
-       return { attached: Boolean(win.__svalinn), installed: globalThis.Svalinn.snapshot().installed };`
+       return {
+         attached: Boolean(win.__svalinn),
+         installed: globalThis.Svalinn.snapshot().installed,
+         hooked: globalThis.Svalinn.hookedWindows(),
+       };`
     );
     record(
       "disabled-mode",
       disabled.status === "disabled" &&
         disabled.installed === false &&
-        disabledMarker.attached === false,
+        disabledMarker.attached === false &&
+        disabledMarker.hooked === 0,
       { status: disabled.status, marker: disabledMarker }
     );
 
@@ -730,10 +953,16 @@ return {
       const afterRestartInstall = fingerprint(
         await runAdapter(client, `return api.snapshot();`)
       );
+      const restoredHooks = await runAdapter(
+        client,
+        `return api.hookedWindows();`
+      );
       record(
         "restart-reattach-safe",
-        restoredInstall.status === "installed" && afterRestartInstall === fingerprint(restoredSnapshot),
-        { status: restoredInstall.status }
+        restoredInstall.status === "installed" &&
+          restoredHooks >= 1 &&
+          afterRestartInstall === fingerprint(restoredSnapshot),
+        { status: restoredInstall.status, hooked: restoredHooks }
       );
     }
 

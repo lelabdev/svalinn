@@ -33,6 +33,18 @@ function makeWindow({
       pinTab() {},
       unpinTab() {},
       addTab() {},
+      duplicateTab() {},
+      removeTab() {},
+      moveTabsBefore() {},
+      moveTabTo() {},
+      tabContainer: {
+        tabDragAndDrop: {
+          handle_drop() {},
+          _getDropIndex() {
+            return 0;
+          },
+        },
+      },
     },
     gZenPinnedTabManager: manager
       ? {
@@ -143,13 +155,13 @@ test("uninstall detaches markers and leaves tabs untouched", async () => {
   const { api, observers } = await makeContext({ windows: [window] });
 
   await api.install({ enabled: true });
-  const before = JSON.stringify(api.snapshot().windows);
+  const before = JSON.stringify(api.snapshot().windows.map(win => win.tabs));
   const report = api.uninstall();
 
   assert.equal(report.status, "uninstalled");
   assert.equal(window.__svalinn, undefined);
   assert.equal(observers.length, 1);
-  assert.equal(JSON.stringify(api.snapshot().windows), before);
+  assert.equal(JSON.stringify(api.snapshot().windows.map(win => win.tabs)), before);
 });
 
 test("unsupported internals fail closed without attaching", async () => {
@@ -250,4 +262,309 @@ test("hostile or missing globals never throw from install or snapshot", async ()
   const report = await api.install({ enabled: true });
   assert.equal(report.status, "not-ready");
   assert.equal(window.__svalinn, undefined);
+});
+
+function makeDropTab(url, { pinned = false, essential = false } = {}) {
+  const attributes = new Set(essential ? ["zen-essential"] : []);
+  return {
+    id: `tab-${url}-${Math.random().toString(36).slice(2)}`,
+    url,
+    pinned,
+    selected: false,
+    linkedBrowser: { currentURI: { spec: url } },
+    documentGlobal: null,
+    hasAttribute: name => attributes.has(name),
+    setAttribute(name) {
+      if (name === "zen-essential") attributes.add(name);
+    },
+    removeAttribute(name) {
+      attributes.delete(name);
+    },
+  };
+}
+
+function makeDropEnvironment() {
+  const stats = {
+    nativeDrops: 0,
+    duplicateCalls: 0,
+    throwOnDuplicate: false,
+    rejectEssentials: false,
+    lazyDuplicate: false,
+    selectedTab: null,
+  };
+  const tabs = [];
+  const win = {};
+
+  const gBrowser = {
+    tabs,
+    isTab: tab => tabs.includes(tab),
+    addTab() {},
+    pinTab(tab) {
+      tab.pinned = true;
+    },
+    unpinTab(tab) {
+      tab.pinned = false;
+    },
+    duplicateTab(source) {
+      stats.duplicateCalls += 1;
+      if (stats.throwOnDuplicate) throw new Error("duplicate failed");
+      const copy = makeDropTab(`${source.url}#copy`, {
+        pinned: source.pinned,
+        essential: source.hasAttribute("zen-essential"),
+      });
+      copy.documentGlobal = win;
+      if (stats.lazyDuplicate) {
+        // SessionStore duplicates are restored asynchronously and initially
+        // look like normal tabs, overwriting any category set too early.
+        copy.id = "";
+        copy.pinned = false;
+        copy.removeAttribute("zen-essential");
+        setTimeout(() => {
+          copy.id = `restored-${stats.duplicateCalls}`;
+          copy.pinned = false;
+          copy.removeAttribute("zen-essential");
+        }, 25);
+      }
+      tabs.push(copy);
+      return copy;
+    },
+    removeTab(tab) {
+      const index = tabs.indexOf(tab);
+      if (index !== -1) tabs.splice(index, 1);
+    },
+    moveTabsBefore(moving, target) {
+      for (const tab of [...moving].reverse()) {
+        const index = tabs.indexOf(tab);
+        if (index !== -1) tabs.splice(index, 1);
+        const targetIndex = tabs.indexOf(target);
+        tabs.splice(targetIndex === -1 ? tabs.length : targetIndex, 0, tab);
+      }
+    },
+    moveTabTo(tab, { elementIndex }) {
+      const index = tabs.indexOf(tab);
+      if (index !== -1) tabs.splice(index, 1);
+      tabs.splice(Math.min(elementIndex, tabs.length), 0, tab);
+    },
+    get selectedTab() {
+      return stats.selectedTab;
+    },
+    set selectedTab(tab) {
+      stats.selectedTab = tab;
+    },
+  };
+
+  const nativeDrop = () => {
+    stats.nativeDrops += 1;
+  };
+  const dnd = {
+    handle_drop: nativeDrop,
+    _getDropIndex: () => 0,
+    _tabbrowserTabs: { dragAndDropElements: tabs },
+  };
+  gBrowser.tabContainer = { tabDragAndDrop: dnd };
+
+  const manager = {
+    addToEssentials(tab) {
+      if (stats.rejectEssentials) return false;
+      tab.pinned = true;
+      tab.setAttribute("zen-essential");
+      return true;
+    },
+    removeEssentials(tab, unpin = true) {
+      tab.removeAttribute("zen-essential");
+      if (unpin) tab.pinned = false;
+    },
+    onCloseTabShortcut() {},
+  };
+
+  Object.assign(win, {
+    gBrowser,
+    gZenPinnedTabManager: manager,
+    gZenStartup: { isReady: true, promiseInitialized: Promise.resolve() },
+    gZenWorkspaces: { promiseInitialized: Promise.resolve() },
+    SessionStore: { promiseAllWindowsRestored: Promise.resolve() },
+    delayedStartupPromise: Promise.resolve(),
+    TAB_DROP_TYPE: "application/x-moz-tabbrowser-tab",
+    addEventListener() {},
+  });
+
+  const addTab = (url, options) => {
+    const tab = makeDropTab(url, options);
+    tab.documentGlobal = win;
+    tabs.push(tab);
+    return tab;
+  };
+
+  return {
+    win,
+    tabs,
+    stats,
+    dnd,
+    nativeDrop,
+    addTab,
+    drop(event, targetSelector = "normal") {
+      const target = {
+        closest: selector => {
+          if (selector === ".zen-essentials-container") {
+            return targetSelector === "essential" ? {} : null;
+          }
+          if (selector === ".zen-workspace-pinned-tabs-section") {
+            return targetSelector === "pinned" ? {} : null;
+          }
+          if (selector === ".zen-workspace-normal-tabs-section") {
+            return targetSelector === "normal" ? {} : null;
+          }
+          return null;
+        },
+      };
+      return dnd.handle_drop({
+        dataTransfer: {
+          dropEffect: "move",
+          mozTypesAt: () => ["application/x-moz-tabbrowser-tab"],
+          mozGetDataAt: () => event.source,
+        },
+        target,
+        preventDefault() {},
+        stopPropagation() {},
+      });
+    },
+  };
+}
+
+async function installDropEnvironment() {
+  const env = makeDropEnvironment();
+  const { api } = await makeContext({ windows: [env.win] });
+  const report = await api.install({ enabled: true });
+  assert.equal(report.status, "installed");
+  return { ...env, api };
+}
+
+test("cross-zone drops duplicate and preserve the protected source", async () => {
+  for (const [sourceZone, targetZone] of [
+    ["essential", "normal"],
+    ["essential", "pinned"],
+    ["pinned", "normal"],
+    ["pinned", "essential"],
+  ]) {
+    const env = await installDropEnvironment();
+    const source = env.addTab(`https://${sourceZone}.test`, {
+      pinned: true,
+      essential: sourceZone === "essential",
+    });
+    source._dragData = { movingTabs: [source] };
+    const before = env.tabs.length;
+
+    env.drop({ source }, targetZone);
+
+    const copies = env.tabs.filter(tab => tab !== source && tab.url.includes("#copy"));
+    assert.equal(env.tabs.length, before + 1, `${sourceZone} -> ${targetZone}`);
+    assert.equal(copies.length, 1);
+    assert.equal(env.api.classify(source).zone, sourceZone);
+    assert.equal(env.api.classify(copies[0]).zone, targetZone);
+    assert.equal(env.stats.selectedTab, copies[0]);
+    assert.equal(env.stats.nativeDrops, 0);
+    assert.equal(env.stats.duplicateCalls, 1);
+  }
+});
+
+test("applies the destination zone after lazy SessionStore restore", async () => {
+  const env = await installDropEnvironment();
+  env.stats.lazyDuplicate = true;
+  const source = env.addTab("https://pinned.test", { pinned: true });
+  const target = env.addTab("https://essential.test", {
+    pinned: true,
+    essential: true,
+  });
+  source._dragData = { movingTabs: [source] };
+
+  env.drop({ source }, "essential");
+  await new Promise(resolve => setTimeout(resolve, 200));
+
+  const copy = env.tabs.find(tab => tab !== source && tab !== target);
+  assert.ok(copy, "expected a duplicated tab");
+  assert.match(copy.id, /^restored-/);
+  assert.equal(env.api.classify(copy).zone, "essential");
+  assert.equal(env.api.classify(source).zone, "pinned");
+  assert.equal(env.stats.nativeDrops, 0);
+});
+
+test("same-zone reordering and normal-tab drops stay native", async () => {
+  for (const [sourceZone, targetZone, pinned, essential] of [
+    ["pinned", "pinned", true, false],
+    ["normal", "pinned", false, false],
+    ["normal", "essential", false, false],
+  ]) {
+    const env = await installDropEnvironment();
+    const source = env.addTab(`https://${sourceZone}.test`, {
+      pinned,
+      essential,
+    });
+    source._dragData = { movingTabs: [source] };
+    const before = env.tabs.length;
+
+    env.drop({ source }, targetZone);
+
+    assert.equal(env.stats.nativeDrops, 1);
+    assert.equal(env.stats.duplicateCalls, 0);
+    assert.equal(env.tabs.length, before);
+  }
+});
+
+test("duplication failures leave the protected source untouched", async () => {
+  const env = await installDropEnvironment();
+  const source = env.addTab("https://essential.test", {
+    pinned: true,
+    essential: true,
+  });
+  source._dragData = { movingTabs: [source] };
+  env.stats.throwOnDuplicate = true;
+
+  assert.doesNotThrow(() => env.drop({ source }, "normal"));
+  assert.equal(env.stats.nativeDrops, 0);
+  assert.equal(env.tabs.length, 1);
+  assert.equal(env.api.classify(source).zone, "essential");
+});
+
+test("rejected Essential duplication removes the copy and keeps the source", async () => {
+  const env = await installDropEnvironment();
+  const source = env.addTab("https://pinned.test", { pinned: true });
+  source._dragData = { movingTabs: [source] };
+  env.stats.rejectEssentials = true;
+
+  env.drop({ source }, "essential");
+
+  assert.equal(env.stats.nativeDrops, 0);
+  assert.equal(env.tabs.length, 1);
+  assert.equal(env.api.classify(source).zone, "pinned");
+});
+
+test("cross-window and multi-tab drags stay native", async () => {
+  const env = await installDropEnvironment();
+  const source = env.addTab("https://pinned.test", { pinned: true });
+  source._dragData = { movingTabs: [source] };
+
+  source.documentGlobal = { gBrowser: {} };
+  env.drop({ source }, "normal");
+  assert.equal(env.stats.nativeDrops, 1);
+
+  source.documentGlobal = env.win;
+  const other = env.addTab("https://other.test");
+  source._dragData = { movingTabs: [source, other] };
+  env.drop({ source }, "normal");
+  assert.equal(env.stats.nativeDrops, 2);
+});
+
+test("uninstall restores the native drop handler", async () => {
+  const env = await installDropEnvironment();
+  assert.equal(env.api.hookedWindows(), 1);
+  assert.notEqual(env.dnd.handle_drop, env.nativeDrop);
+
+  env.api.uninstall();
+
+  assert.equal(env.api.hookedWindows(), 0);
+  assert.equal(env.dnd.handle_drop, env.nativeDrop);
+  const source = env.addTab("https://pinned.test", { pinned: true });
+  source._dragData = { movingTabs: [source] };
+  env.drop({ source }, "normal");
+  assert.equal(env.stats.nativeDrops, 1);
 });

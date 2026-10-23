@@ -17,6 +17,11 @@ function makeScope(overrides = {}) {
       pinTab() {},
       unpinTab() {},
       addTab() {},
+      duplicateTab() {},
+      removeTab() {},
+      moveTabsBefore() {},
+      moveTabTo() {},
+      tabContainer: { tabDragAndDrop: { handle_drop() {} } },
     },
     gZenPinnedTabManager: {
       addToEssentials() {},
@@ -46,6 +51,26 @@ test("rejects non-Zen browsers", () => {
   assert.equal(report.ok, false);
   assert.equal(report.isZen, false);
   assert.ok(report.missing.includes("Services.appinfo.name=Zen"));
+});
+
+test("fails closed when the tab strip drop handler is unavailable", () => {
+  const missingControl = makeScope();
+  delete missingControl.gBrowser.tabContainer.tabDragAndDrop;
+  const report = probeCapabilities(missingControl);
+  assert.equal(report.ok, false);
+  assert.ok(
+    report.missing.includes("gBrowser.tabContainer.tabDragAndDrop")
+  );
+
+  const missingMethod = makeScope();
+  delete missingMethod.gBrowser.tabContainer.tabDragAndDrop.handle_drop;
+  const methodReport = probeCapabilities(missingMethod);
+  assert.equal(methodReport.ok, false);
+  assert.ok(
+    methodReport.missing.includes(
+      "gBrowser.tabContainer.tabDragAndDrop.handle_drop"
+    )
+  );
 });
 
 test("reports every missing or changed internal method", () => {
