@@ -17,25 +17,30 @@
 
 ## Current status
 
-**Close/unpin/removal protection and cross-zone duplication implemented and smoke-tested.**
+**Close/unpin/removal protection, cross-zone duplication, and one-shot unlock implemented and smoke-tested.**
 
 - `src/policy.mjs`: dependency-free, testable protection rules.
 - `tests/`: policy regression tests plus adapter, capability, close-guard,
-  drop-guard, bundling, and protocol tests. Run with `npm test`.
+  drop-guard, unlock, bundling, and protocol tests. Run with `npm test`.
 - `src/zen/`: privileged adapter with close/demotion and cross-zone drop guards,
-  plus a Marionette smoke harness.
-- `userChrome.css`: visual draft; **does not protect against keyboard, drag/drop, or native tab removal**.
+  a one-shot temporary unlock, and a Marionette smoke harness.
+- `userChrome.css`: presentation layer that hides the close X on locked
+  protected tabs and reveals it while a tab is unlocked. CSS is not the security
+  boundary.
 - `assets/icon.svg`: earlier provisional icon, not yet approved as final.
 
 Observed on **Zen 1.23.4b** (TufTux, Arch Linux): `ZenPinnedTabManager.mjs` includes `removeEssentials`, `addToEssentials`, `onCloseTabShortcut`, and `moveToAnotherTabContainerIfNecessary`. Dragging a Pinned to normal invokes `gBrowser.unpinTab`.
 
-Zen Mods are CSS-only. A true guard requires a privileged integration with browser chrome. With Svalinn enabled:
+Zen Mods are CSS-only. A true guard requires a privileged integration with browser chrome. The lock is global and on by default. With Svalinn enabled:
 
 - Close button, middle click, `Ctrl+W`, context-menu close, close-other/selected,
   unpin, and Remove from Essentials are blocked for protected tabs.
 - Mixed multi-close still closes normal tabs and keeps protected tabs.
 - Normal tabs, unloading, browser quit, window close, and session restore stay
   native.
+- Right-click a protected tab and choose **Unlock Svalinn (one action)** to reveal
+  the close X and destructive menu entries for one intentional action. Anything
+  unused relocks after 15 seconds; restarting always relocks.
 - Cross-zone drag and drop duplicates for a single tab in one window:
 
 | Source | Target | Result |
@@ -53,9 +58,10 @@ npm run zen:smoke
 
 It launches an isolated profile, injects the adapter, verifies
 normal/Pinned/Essential mapping, close/unpin/removal guards, mixed multi-close,
-the Zen close shortcut, unloading, all four duplication transitions, same-zone
-and normal-tab behavior, failure safety, uninstall during a pending restore,
-restart/session restore, then deletes the profile. It never patches
+the Zen close shortcut, unloading, CSS close-button visibility, locked/unlocked
+context menus, one-shot unlock and expiry, all four duplication transitions,
+same-zone and normal-tab behavior, failure safety, uninstall during a pending
+restore, restart/session restore, then deletes the profile. It never patches
 `/opt/zen-browser-bin` and never uses `~/.zen`. See
 [`docs/zen-integration.md`](docs/zen-integration.md) for the mechanism, manual
 smoke matrix, security model, and rollback steps.
@@ -99,6 +105,5 @@ resolved. A “Lock Essentials” option was discussed there, but Svalinn's
 
 1. Choose and document a maintainable deployment path for the adapter (the smoke harness is not a user installation), then test in a disposable Zen profile and verify Zen update compatibility before enabling in the main profile.
 2. Extend pre-move duplication to multi-selected, cross-window, folder, tab-group and split-view cases.
-3. Add explicit temporary unlock and visual controls on top of the policy.
 
 **Safety:** do not patch `/opt/zen-browser-bin` or enable experimental scripts in the daily profile during development.

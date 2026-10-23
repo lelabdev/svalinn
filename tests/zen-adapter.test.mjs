@@ -278,7 +278,7 @@ function makeDropTab(url, { pinned = false, essential = false } = {}) {
     documentGlobal: null,
     hasAttribute: name => attributes.has(name),
     setAttribute(name) {
-      if (name === "zen-essential") attributes.add(name);
+      attributes.add(name);
     },
     removeAttribute(name) {
       attributes.delete(name);
@@ -647,6 +647,85 @@ test("uninstall restores close hooks", async () => {
   env.api.uninstall();
   assert.equal(env.api.closeGuardedWindows(), 0);
 
+  env.win.gBrowser.removeTab(pinned);
+  assert.equal(env.tabs.includes(pinned), false);
+});
+
+test("temporary unlock permits one close and consumes itself", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const normal = env.addTab("https://normal.test");
+
+  assert.equal(env.api.unlockTab(normal).unlocked, false);
+  assert.equal(env.api.unlockTab(pinned).unlocked, true);
+  assert.equal(env.api.isTabUnlocked(pinned), true);
+  assert.equal(pinned.hasAttribute("svalinn-unlocked"), true);
+  assert.equal(env.api.lockState().unlocked, 1);
+
+  env.win.gBrowser.removeTab(pinned);
+  assert.equal(env.tabs.includes(pinned), false);
+  assert.equal(env.api.isTabUnlocked(pinned), false);
+  assert.equal(env.api.unlockedCount(), 0);
+});
+
+test("temporary unlock permits one unpin or Essential removal", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const essential = env.addTab("https://essential.test", {
+    pinned: true,
+    essential: true,
+  });
+
+  env.api.unlockTab(pinned);
+  env.win.gBrowser.unpinTab(pinned);
+  assert.equal(pinned.pinned, false);
+  assert.equal(env.api.isTabUnlocked(pinned), false);
+
+  env.api.unlockTab(essential);
+  env.win.gZenPinnedTabManager.removeEssentials(essential);
+  assert.equal(essential.hasAttribute("zen-essential"), false);
+  assert.equal(env.api.isTabUnlocked(essential), false);
+});
+
+test("temporary unlock expires back to the locked default", async () => {
+  const env = await installDropEnvironment({ unlockTimeoutMs: 20 });
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+
+  assert.equal(env.api.unlockTab(pinned).unlocked, true);
+  await new Promise(resolve => setTimeout(resolve, 60));
+
+  assert.equal(env.api.isTabUnlocked(pinned), false);
+  assert.equal(pinned.hasAttribute("svalinn-unlocked"), false);
+  env.win.gBrowser.removeTab(pinned);
+  assert.ok(env.tabs.includes(pinned));
+});
+
+test("temporary unlock allows one cross-zone native demotion", async () => {
+  const env = await installDropEnvironment();
+  const source = env.addTab("https://pinned.test", { pinned: true });
+  const target = env.addTab("https://normal.test");
+  source._dragData = { movingTabs: [source] };
+  env.api.unlockTab(source);
+
+  env.drop({ source }, "normal");
+
+  assert.equal(env.stats.nativeDrops, 1);
+  assert.equal(env.stats.duplicateCalls, 0);
+  assert.equal(env.api.isTabUnlocked(source), false);
+  assert.ok(env.tabs.includes(source));
+  assert.ok(env.tabs.includes(target));
+});
+
+test("uninstall clears temporary unlocks", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+
+  env.api.unlockTab(pinned);
+  assert.equal(pinned.hasAttribute("svalinn-unlocked"), true);
+
+  env.api.uninstall();
+  assert.equal(env.api.unlockedCount(), 0);
+  assert.equal(pinned.hasAttribute("svalinn-unlocked"), false);
   env.win.gBrowser.removeTab(pinned);
   assert.equal(env.tabs.includes(pinned), false);
 });
