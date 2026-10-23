@@ -6,7 +6,8 @@
   "description": "Protect pinned and essential tabs in Zen Browser",
   "scripts": {
     "test": "node --test",
-    "check": "node --check src/policy.mjs && node --test"
+    "check": "node --check src/policy.mjs && node --check src/zen/adapter.body.js && node --test",
+    "zen:smoke": "node src/zen/smoke.mjs"
   },
   "engines": {
     "node": ">=22"
