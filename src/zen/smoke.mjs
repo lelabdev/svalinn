@@ -40,6 +40,8 @@ const PROFILE_PREFS = {
   "zen.watermark.enabled": false,
   "svalinn.enabled": false,
   "toolkit.legacyUserProfileCustomizations.stylesheets": true,
+  "privacy.userContext.enabled": true,
+  "privacy.userContext.ui.enabled": true,
 };
 
 export class SmokeError extends Error {
@@ -797,6 +799,272 @@ return {
   );
 }
 
+async function runAdvancedDragScenarios(client, urls) {
+  return runScript(
+    client,
+    `
+const win = [...Services.wm.getEnumerator("navigator:browser")][0];
+const api = globalThis.Svalinn;
+const gBrowser = win.gBrowser;
+const manager = win.gZenPinnedTabManager;
+const workspaces = win.gZenWorkspaces;
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+const zone = tab =>
+  tab.hasAttribute("zen-essential")
+    ? "essential"
+    : tab.pinned
+      ? "pinned"
+      : "normal";
+const principal = Services.scriptSecurityManager.getSystemPrincipal();
+const base = ${JSON.stringify(urls.normal)};
+let seq = 0;
+const results = [];
+const check = (name, ok, details) => results.push({ name, ok, details });
+
+const makeTab = async ({ pinned = false, essential = false, url = null, userContextId = 0 } = {}) => {
+  const tab = gBrowser.addTab(url ?? base + "#advanced-" + ++seq, {
+    triggeringPrincipal: principal,
+    inBackground: true,
+    userContextId,
+  });
+  await wait(120);
+  if (pinned || essential) gBrowser.pinTab(tab);
+  await wait(100);
+  if (essential) manager.addToEssentials(tab);
+  await wait(150);
+  return tab;
+};
+
+const dispatchDrop = (source, target, movingTabs = [source]) => {
+  source._dragData = {
+    movingTabs,
+    movingTabsSet: new Set(movingTabs),
+    fromTabList: false,
+    dropElement: target,
+    dropBefore: true,
+    translateX: (target.screenX ?? 0) - (source.screenX ?? 0),
+    translateY: (target.screenY ?? 0) - (source.screenY ?? 0),
+    tabWidth: source.getBoundingClientRect().width || 200,
+    tabHeight: source.getBoundingClientRect().height || 30,
+  };
+  const dataTransfer = new win.DataTransfer();
+  dataTransfer.mozSetDataAt(win.TAB_DROP_TYPE, source, 0);
+  dataTransfer.dropEffect = "move";
+  const rect = target.getBoundingClientRect();
+  target.dispatchEvent(new win.DragEvent("drop", {
+    bubbles: true,
+    cancelable: true,
+    dataTransfer,
+    screenX: (target.screenX ?? rect.left) + rect.width / 2,
+    screenY: (target.screenY ?? rect.top) + rect.height / 2 + 2,
+  }));
+};
+
+const originalWorkspace = workspaces.activeWorkspace;
+const originalData = workspaces.getActiveWorkspaceFromCache();
+const workspace = {
+  ...originalData,
+  uuid: "svalinn-ws-" + Date.now(),
+  name: "Svalinn Workspace",
+  containerTabId: 1,
+};
+workspaces.saveWorkspace(workspace);
+await wait(500);
+await workspaces.changeWorkspaceWithID(workspace.uuid);
+await wait(1200);
+
+const containerPinned = await makeTab({ pinned: true, userContextId: 1 });
+const containerNormal = await makeTab({ userContextId: 1 });
+const containerEssential = await makeTab({ essential: true, userContextId: 1 });
+api.setDragBehavior("duplicate");
+await dispatchDrop(containerPinned, containerNormal);
+await wait(1200);
+const containerCopy = [...gBrowser.tabs].find(
+  tab =>
+    tab !== containerPinned &&
+    tab.linkedBrowser?.currentURI?.spec === base + "#advanced-1"
+);
+check(
+  "drag-duplicate-container",
+  Boolean(containerCopy) &&
+    containerCopy.userContextId === 1 &&
+    zone(containerCopy) === "normal" &&
+    zone(containerPinned) === "pinned",
+  {
+    copy: Boolean(containerCopy),
+    copyContainer: containerCopy?.userContextId ?? null,
+    copyZone: containerCopy ? zone(containerCopy) : null,
+    sourceZone: zone(containerPinned),
+  }
+);
+
+// Move to the original workspace: source tabs from another workspace must block.
+await workspaces.changeWorkspaceWithID(originalWorkspace);
+await wait(1200);
+const localPinned = await makeTab({ pinned: true });
+const localEssential = await makeTab({ essential: true });
+await dispatchDrop(containerPinned, localPinned);
+check(
+  "drag-cross-workspace-blocked",
+  zone(containerPinned) === "pinned" &&
+    containerPinned.getAttribute("zen-workspace-id") === workspace.uuid &&
+    zone(localPinned) === "pinned",
+  {
+    sourceZone: zone(containerPinned),
+    sourceWorkspace: containerPinned.getAttribute("zen-workspace-id"),
+    expectedWorkspace: workspace.uuid,
+  }
+);
+
+await dispatchDrop(containerEssential, localEssential);
+check(
+  "drag-container-specific-essential-blocked",
+  zone(containerEssential) === "essential" &&
+    containerEssential.userContextId === 1,
+  {
+    sourceZone: zone(containerEssential),
+    sourceContainer: containerEssential.userContextId,
+  }
+);
+
+// Folder label expansion: a protected child must be found and protected.
+const folderA = await makeTab({ pinned: true });
+const folderB = await makeTab({ pinned: true });
+const folder = win.gZenFolders.createFolder([folderA, folderB]);
+await wait(700);
+await dispatchDrop(folder, localPinned);
+check(
+  "drag-group-label-blocked",
+  zone(folderA) === "pinned" && zone(folderB) === "pinned" &&
+    folderA.closest("zen-folder") !== null,
+  {
+    firstZone: zone(folderA),
+    secondZone: zone(folderB),
+    inFolder: folderA.closest("zen-folder") !== null,
+  }
+);
+const beforeFolderNative = new Set(gBrowser.tabs);
+await dispatchDrop(folder, localPinned, [folder]);
+check(
+  "drag-group-label-same-zone-native",
+  [...gBrowser.tabs].length === beforeFolderNative.size &&
+    zone(folderA) === "pinned" && zone(folderB) === "pinned",
+  {
+    added: [...gBrowser.tabs].length - beforeFolderNative.size,
+    firstZone: zone(folderA),
+  }
+);
+
+// Folder-to-folder organization: same category, protected membership preserved.
+const folderSecondTab = await makeTab({ pinned: true });
+const folderSecond = win.gZenFolders.createFolder([folderSecondTab]);
+await wait(700);
+let movedByDrop = false;
+try {
+  Object.defineProperty(folderA, "container", {
+    value: gBrowser.tabContainer,
+    configurable: true,
+  });
+  await dispatchDrop(folderA, folderSecond);
+  await wait(900);
+  movedByDrop = folderA.closest("zen-folder") === folderSecond;
+} catch {
+  movedByDrop = false;
+}
+if (!movedByDrop) folderSecond.addTabs([folderA]);
+await wait(700);
+check(
+  "folder-to-folder-membership",
+  folderA.pinned === true &&
+    zone(folderA) === "pinned" &&
+    folderA.closest("zen-folder") === folderSecond,
+  {
+    pinned: folderA.pinned,
+    zone: zone(folderA),
+    inTargetFolder: folderA.closest("zen-folder") === folderSecond,
+    viaDrop: movedByDrop,
+    sourceFolder: folder,
+  }
+);
+
+// Split-view target must block a protected drop.
+const splitA = await makeTab();
+const splitB = await makeTab();
+win.gZenViewSplitter.splitTabs([splitA, splitB], "grid", 0, { activate: false });
+await wait(700);
+const splitBefore = new Set(gBrowser.tabs);
+await dispatchDrop(localPinned, splitA);
+check(
+  "drag-split-view-blocked",
+  [...gBrowser.tabs].length === splitBefore.size &&
+    zone(localPinned) === "pinned" &&
+    splitA.splitView === true,
+  {
+    added: [...gBrowser.tabs].length - splitBefore.size,
+    sourceZone: zone(localPinned),
+    split: splitA.splitView,
+  }
+);
+
+// Split-view source containing protected tabs fails closed.
+const splitPinnedA = await makeTab({ pinned: true });
+const splitPinnedB = await makeTab({ pinned: true });
+win.gZenViewSplitter.splitTabs([splitPinnedA, splitPinnedB], "grid", 0, {
+  activate: false,
+});
+await wait(700);
+await dispatchDrop(splitPinnedA, localPinned);
+check(
+  "drag-split-view-source-blocked",
+  zone(splitPinnedA) === "pinned" &&
+    zone(splitPinnedB) === "pinned" &&
+    splitPinnedA.splitView === true,
+  {
+    firstZone: zone(splitPinnedA),
+    secondZone: zone(splitPinnedB),
+    split: splitPinnedA.splitView,
+  }
+);
+
+// Multi-selected same-category move remains native and changes order.
+const multiA = await makeTab({ pinned: true });
+const multiB = await makeTab({ pinned: true });
+const multiC = await makeTab({ pinned: true });
+const multiBefore = new Set(gBrowser.tabs);
+const orderBefore = [...gBrowser.tabs].map(tab => tab.id);
+await dispatchDrop(multiC, multiA, [multiC, multiB]);
+await wait(700);
+const orderAfter = [...gBrowser.tabs].map(tab => tab.id);
+check(
+  "drag-multi-same-category-native",
+  [...gBrowser.tabs].length === multiBefore.size &&
+    zone(multiA) === "pinned" &&
+    zone(multiB) === "pinned" &&
+    orderBefore.join(",") !== orderAfter.join(","),
+  {
+    added: [...gBrowser.tabs].length - multiBefore.size,
+    firstZone: zone(multiA),
+    secondZone: zone(multiB),
+    orderChanged: orderBefore.join(",") !== orderAfter.join(","),
+  }
+);
+
+api.setDragBehavior("block");
+await workspaces.changeWorkspaceWithID(originalWorkspace);
+await wait(800);
+
+return {
+  results,
+  workspace: workspace.uuid,
+  originalWorkspace,
+  activeWorkspace: workspaces.activeWorkspace,
+  behavior: api.dragBehavior(),
+  warnings: api.snapshot().warnings,
+};`,
+    { timeoutMs: 90_000 }
+  );
+}
+
 async function runCloseProtectionScenarios(client, urls) {
   return runScript(
     client,
@@ -862,7 +1130,10 @@ check(
 );
 
 gBrowser.removeTabs([pinned, normalMulti]);
-await wait(600);
+const multiCloseDeadline = Date.now() + 5000;
+while (Date.now() < multiCloseDeadline && tabsInclude(normalMulti)) {
+  await wait(100);
+}
 check(
   "multi-close-keeps-protected",
   tabsInclude(pinned) && !tabsInclude(normalMulti),
@@ -1391,6 +1662,25 @@ return { display, activeMarker };
       record(result.name, result.ok, result.details);
     }
     record("drag-drop-hooks-intact", drops.hooked >= 1, { hooked: drops.hooked });
+
+    phase = "drag-contexts";
+    const advancedDrops = await runAdvancedDragScenarios(
+      client,
+      profileInfo.urls
+    );
+    for (const result of advancedDrops.results) {
+      record(result.name, result.ok, result.details);
+    }
+    record(
+      "drag-context-workspace-restored",
+      advancedDrops.activeWorkspace === advancedDrops.originalWorkspace &&
+        advancedDrops.behavior === "block",
+      {
+        activeWorkspace: advancedDrops.activeWorkspace,
+        originalWorkspace: advancedDrops.originalWorkspace,
+        behavior: advancedDrops.behavior,
+      }
+    );
 
     phase = "close-protection";
     const closeChecks = await runCloseProtectionScenarios(

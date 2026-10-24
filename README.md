@@ -70,10 +70,13 @@ multi-close, the Zen close shortcut, unloading, CSS close-button visibility,
 folder-contained tabs, context-menu restrictions that preserve Zen's native
 state, intentional unpin/Remove-from-Essentials commands, uninstall restoring
 native affordances, default drag blocking, multi/folder/cross-window safety,
-optional duplicate mode, same-zone/normal-tab behavior, failure safety, restart,
-then deletes the profile. It never patches `/opt/zen-browser-bin` and never uses
-`~/.zen`. See [`docs/zen-integration.md`](docs/zen-integration.md) for the
-mechanism, manual smoke matrix, security model, and rollback steps.
+two real workspaces, a non-default container, container-specific Essentials,
+group-label and split-view drops, folder-to-folder membership, multi-tab reorder,
+optional duplicate mode with non-default container identity, same-zone/normal-tab
+behavior, failure safety, restart, then deletes the profile. It never patches
+`/opt/zen-browser-bin` and never uses `~/.zen`. See
+[`docs/zen-integration.md`](docs/zen-integration.md) for the mechanism, manual
+smoke matrix, security model, and rollback steps.
 
 
 ## Potential upstream contribution to Zen Browser

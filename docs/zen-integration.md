@@ -309,18 +309,25 @@ How the guard works:
 
 1. Svalinn wraps `gBrowser.tabContainer.tabDragAndDrop.handle_drop` in every
    browser window.
-2. It resolves the dragged tab(s), target category, and any group/split-view
-   children before Zen mutates anything.
-3. Non-protected sources fall through to native behavior.
-4. Protected cross-category, cross-window, multi-tab, unknown-target, and
-   ambiguous group/split-view drops are consumed: native demotion/adoption is not
-   called and the source remains in its original category.
-5. In duplicate mode, only a single protected tab crossing a category is copied.
+2. It canonicalizes the entire moving set: the primary source, every
+   `movingTabs` entry, native tab-group labels, Zen folders, and split-view
+   members. Unreadable/cyclic/unknown membership fails closed.
+3. It resolves the target category, active/source/target workspace, container
+   context, and split-view involvement before Zen mutates anything.
+4. A protected drag is allowed natively only when it is a proven same-window,
+   same-workspace, same-category, compatible-container, non-split organization
+   change (reorder or safe folder move).
+5. Non-protected drags fall through to native behavior.
+6. Protected cross-category, cross-window, cross-workspace, container-incompatible
+   Essentials, multi-tab/group, split-view, and unknown-target drops are consumed:
+   native demotion/adoption is not called and the source remains in its original
+   category/workspace/container.
+7. In duplicate mode, only a single protected tab crossing a category is copied.
    The destination zone is applied after `SSTabRestored`; a nonempty tab id is not
    proof of restoration. Pending copies are cancelled on uninstall/window detach,
    and failures remove the copy while keeping the source.
 
-## Install and uninstall model## Install and uninstall model
+## Install and uninstall model
 
 There is intentionally no persistent installation for this phase.
 
@@ -423,10 +430,12 @@ npm run zen:smoke
   opt-in/disabled mode, idempotent install, clean uninstall, startup timeouts,
   multi-window snapshots and observer attachment, default drag blocking,
   optional duplication mode, multi-selection/cross-window/group fail-closed
-  behavior, same-zone native reordering, event-driven lazy SessionStore
-  restoration (including a nonempty-id false signal), restore timeout, unknown
-  and throwing targets, planning errors, uninstall cancellation, duplication
-  failures, Essential rejection, and no source-tab mutation
+  behavior, source/destination workspace and container provenance, group-label
+  expansion (including normal-origin labels), split-view source/target handling,
+  unreadable group membership, same-zone native reordering, event-driven lazy
+  SessionStore restoration (including a nonempty-id false signal), restore
+  timeout, unknown and throwing targets, planning errors, uninstall cancellation,
+  duplication failures, Essential rejection, and no source-tab mutation
 - injection bundling, CSS marker scoping, and Marionette framing/error handling
 
 `npm run zen:smoke` is the integration check against a real Zen process. It
@@ -436,12 +445,15 @@ CSS close-button visibility, folder-contained tabs, locked context-menu
 restrictions without mutating Zen's native hidden state, intentional unpin and
 Remove-from-Essentials commands (including folder tabs and authorization
 cleanup), default block behavior for all four cross-category transitions,
-multi-selection/folder/cross-window drag safety, optional duplicate mode,
-duplication failure/internal pages, same-zone and normal-tab dragging,
-deletion-safe failure paths, an unknown-target negative control, delayed-restore
-cancellation by uninstall, reinstall after cancellation, multi-window
-attachment, restart/session restore, and shutdown. It is not part of `npm test`
-because it launches a browser.
+multi-selection/folder/cross-window drag safety, two real workspaces, a
+non-default container workspace, container-specific Essentials incompatibility,
+group-label moves, split-view source/target drops, a real multi-selected
+same-category reorder, folder-to-folder membership, optional duplicate mode with
+non-default container identity, duplication failure/internal pages, same-zone and
+normal-tab dragging, deletion-safe failure paths, an unknown-target negative
+control, delayed-restore cancellation by uninstall, reinstall after cancellation,
+multi-window attachment, restart/session restore, and shutdown. It is not part of
+`npm test` because it launches a browser.
 
 A separate **real-input UI matrix** was run against a windowed Zen 1.23.4b test
 profile using xdotool (X11/XWayland), not direct API calls:
@@ -493,11 +505,15 @@ profile using xdotool (X11/XWayland), not direct API calls:
   proven single-tab/same-window transitions copy, and failures remove the copy.
 - **Unsupported paths fail closed.** Cross-window, workspace/container/group/
   split-view, unknown-target, and multi-tab protected category changes do not
-  reach native demotion/adoption.
+  reach native demotion/adoption. Source and destination workspace/container
+  provenance is checked before delegation.
 - **Non-protected tabs keep native behavior.**
 - **Coverage.** Automated adapter tests and the real Zen smoke suite exercise
-  block mode, duplicate mode, same-zone/folder moves, multi-selection,
-  cross-window, failure cleanup, close guards, restart, and shutdown.
+  block mode, duplicate mode, safe same-zone/folder moves, multi-selection,
+  cross-window, two real workspaces, non-default container tabs,
+  container-specific Essentials, group labels, split-view source/target,
+  folder-to-folder membership, failure cleanup, close guards, restart, and
+  shutdown.
 
 ## Known limitations
 
@@ -519,6 +535,11 @@ profile using xdotool (X11/XWayland), not direct API calls:
 - Default drag behavior is `block`. Optional `duplicate` mode only copies a
   single protected tab in the same window; cross-window, group/split-view,
   workspace, and multi-tab transitions still fail closed.
+- Same-category delegation requires matching source/destination workspace and,
+  for Essentials, container context; split-view or ambiguous group membership
+  blocks instead of moving.
+- Folder-to-folder membership is verified with Zen's native folder operations;
+  protected category retention is the guarded invariant.
 - When a multi-selection includes a protected tab crossing categories, the whole
   drop is blocked. Normal tabs in that selection stay open but do not move.
 - Independent per-category enable/disable for Essentials vs Pinned is not exposed

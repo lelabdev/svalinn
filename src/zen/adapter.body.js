@@ -151,27 +151,128 @@
     return null;
   }
 
-  function collectMovingTabs(source, movingTabs) {
-    const tabs = [];
-    const add = tab => {
-      if (tab && !tabs.includes(tab)) tabs.push(tab);
-    };
-    if (Array.isArray(movingTabs)) {
-      for (const tab of movingTabs) add(tab);
-    } else {
-      add(source);
-    }
+  function activeWorkspaceId(win) {
     try {
-      if (source?.group?.tabs) {
-        for (const tab of source.group.tabs) add(tab);
+      return (
+        win?.gZenWorkspaces?.activeWorkspace ??
+        win?.gZenWorkspaces?.getActiveWorkspaceFromCache?.()?.uuid ??
+        null
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  function activeContainerId(win) {
+    try {
+      return (
+        win?.gZenWorkspaces?.getActiveWorkspaceFromCache?.()?.containerTabId ?? 0
+      );
+    } catch {
+      return 0;
+    }
+  }
+
+  function targetWorkspaceId(win, target) {
+    try {
+      const node = target?.closest?.("[zen-workspace-id]");
+      if (node) return node.getAttribute("zen-workspace-id");
+      if (target?.closest?.(".zen-essentials-container")) {
+        return activeWorkspaceId(win);
       }
-      if (source?.splitview?.tabs) {
-        for (const tab of source.splitview.tabs) add(tab);
+      if (win?.gZenWorkspaces?.activeWorkspaceElement?.contains?.(target)) {
+        return activeWorkspaceId(win);
       }
     } catch {
-      // Fall back to the directly dragged items.
+      // Unknown target workspace; callers fail closed for protected tabs.
     }
-    return tabs;
+    return null;
+  }
+
+  function tabContainerId(tab) {
+    try {
+      return tab?.userContextId ?? Number(tab?.getAttribute?.("usercontextid") ?? 0);
+    } catch {
+      return 0;
+    }
+  }
+
+  function isSplitViewItem(win, item) {
+    try {
+      if (win?.gBrowser?.isSplitViewWrapper?.(item)) return true;
+      if (item?.splitview || item?.splitView) return true;
+      if (item?.group?.hasAttribute?.("split-view-group")) return true;
+    } catch {
+      return true;
+    }
+    return false;
+  }
+
+  function collectMovingTabs(win, source, movingTabs) {
+    const tabs = [];
+    const seen = new Set();
+    let uncertain = null;
+    let hasSplitView = false;
+
+    const visit = (item, depth = 0) => {
+      if (!item || uncertain) return;
+      if (seen.has(item)) return;
+      seen.add(item);
+      if (depth > 6) {
+        uncertain = "group-depth";
+        return;
+      }
+
+      try {
+        if (win?.gBrowser?.isTab?.(item)) {
+          tabs.push(item);
+          if (isSplitViewItem(win, item)) hasSplitView = true;
+          return;
+        }
+
+        if (win?.gBrowser?.isSplitViewWrapper?.(item)) {
+          hasSplitView = true;
+          const members = item.tabs;
+          if (!members || typeof members[Symbol.iterator] !== "function") {
+            uncertain = "split-members";
+            return;
+          }
+          for (const tab of members) visit(tab, depth + 1);
+          return;
+        }
+
+        if (win?.gBrowser?.isTabGroupLabel?.(item)) {
+          const members = item.group?.tabs;
+          if (!members || typeof members[Symbol.iterator] !== "function") {
+            uncertain = "group-members";
+            return;
+          }
+          for (const tab of members) visit(tab, depth + 1);
+          return;
+        }
+
+        // Some Zen folder/group implementations expose members directly.
+        const directMembers = item?.group?.tabs ?? item?.tabs;
+        if (directMembers && typeof directMembers[Symbol.iterator] === "function") {
+          if (item?.group?.hasAttribute?.("split-view-group")) {
+            hasSplitView = true;
+          }
+          for (const tab of directMembers) visit(tab, depth + 1);
+          return;
+        }
+
+        uncertain = "unknown-drag-item";
+      } catch {
+        uncertain = "unreadable-drag-item";
+      }
+    };
+
+    visit(source);
+    if (Array.isArray(movingTabs)) {
+      for (const item of movingTabs) visit(item);
+    }
+
+    return { tabs, uncertain, hasSplitView };
   }
 
   /**
@@ -184,7 +285,7 @@
   function planDrop(win, dnd, event) {
     let source = null;
     let protectedTabs = [];
-    let sameWindow = false;
+    let collected = null;
 
     try {
       const dataTransfer = event?.dataTransfer;
@@ -200,16 +301,29 @@
       source = dataTransfer.mozGetDataAt(dropType, 0);
       if (!source) return { action: "native" };
 
-      const tabs = collectMovingTabs(source, source._dragData?.movingTabs);
-      protectedTabs = tabs.filter(tab => isProtected(readTabFlags(tab)));
-      sameWindow = source.documentGlobal === win;
+      collected = collectMovingTabs(
+        win,
+        source,
+        source._dragData?.movingTabs
+      );
     } catch {
       return { action: "native" };
     }
 
+    if (collected.uncertain) {
+      return {
+        action: "block",
+        source,
+        reason: `uncertain-members:${collected.uncertain}`,
+      };
+    }
+
+    protectedTabs = collected.tabs.filter(tab =>
+      isProtected(readTabFlags(tab))
+    );
     if (!protectedTabs.length) return { action: "native" };
 
-    if (!sameWindow) {
+    if (protectedTabs.some(tab => tab.documentGlobal !== win)) {
       return {
         action: "block",
         source,
@@ -225,6 +339,74 @@
           source,
           reason: "unknown-target",
         };
+      }
+
+      const targetTab = event.target?.closest?.(".tabbrowser-tab") ?? null;
+      if (
+        collected.hasSplitView ||
+        isSplitViewItem(win, event.target) ||
+        (targetTab && isSplitViewItem(win, targetTab))
+      ) {
+        return {
+          action: "block",
+          source,
+          reason: "split-view",
+        };
+      }
+
+      const activeWorkspace = activeWorkspaceId(win);
+      if (!activeWorkspace) {
+        return {
+          action: "block",
+          source,
+          reason: "workspace-unknown",
+        };
+      }
+
+      const targetWorkspace = targetWorkspaceId(win, event.target);
+      if (!targetWorkspace || targetWorkspace !== activeWorkspace) {
+        return {
+          action: "block",
+          source,
+          reason: "target-workspace-mismatch",
+        };
+      }
+
+      for (const tab of protectedTabs) {
+        const flags = readTabFlags(tab);
+        const tabWorkspace = flags.essential
+          ? activeWorkspace
+          : tab.getAttribute?.("zen-workspace-id");
+        if (!tabWorkspace) {
+          return {
+            action: "block",
+            source,
+            reason: "source-workspace-unknown",
+          };
+        }
+        if (tabWorkspace !== activeWorkspace) {
+          return {
+            action: "block",
+            source,
+            reason: "source-workspace-mismatch",
+          };
+        }
+      }
+
+      if (
+        targetZone === ZONES.ESSENTIAL &&
+        win.gZenWorkspaces?.containerSpecificEssentials
+      ) {
+        const targetContainer = activeContainerId(win);
+        for (const tab of protectedTabs) {
+          if (tabContainerId(tab) !== targetContainer) {
+            return {
+              action: "block",
+              source,
+              reason: "container-mismatch",
+            };
+          }
+        }
       }
 
       const movingTabs = source._dragData?.movingTabs;
