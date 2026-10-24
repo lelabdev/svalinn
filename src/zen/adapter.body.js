@@ -1301,14 +1301,24 @@
   }
 
   function setLockMarker(win) {
-    try {
-      win?.document?.documentElement?.toggleAttribute?.(
-        UNLOCKED_ATTR,
-        !state.locked
-      );
-    } catch (error) {
-      state.warnings.push(`lock-marker: ${error}`);
+    const element = win?.document?.documentElement;
+    if (
+      !element ||
+      typeof element.toggleAttribute !== "function" ||
+      typeof element.hasAttribute !== "function"
+    ) {
+      throw new Error("lock-marker-unavailable");
     }
+    const expected = !state.locked;
+    element.toggleAttribute(UNLOCKED_ATTR, expected);
+    if (element.hasAttribute(UNLOCKED_ATTR) !== expected) {
+      throw new Error(
+        `lock-marker-mismatch: expected ${expected}, got ${element.hasAttribute(
+          UNLOCKED_ATTR
+        )}`
+      );
+    }
+    return true;
   }
 
   function syncWindowLock(win) {
@@ -1375,10 +1385,14 @@
       } catch (persistError) {
         state.warnings.push(`lock-pref-revert: ${persistError}`);
       }
+      const restorationErrors = [];
       for (const win of browserWindows()) {
         try {
           syncWindowLock(win);
-        } catch {}
+        } catch (restoreError) {
+          restorationErrors.push(String(restoreError));
+          state.warnings.push(`lock-restore: ${restoreError}`);
+        }
       }
       state.warnings.push(`lock-sync: ${error}`);
       return report("error", {
@@ -1386,6 +1400,7 @@
         locked: previous,
         changedTabs: false,
         error: String(error),
+        restorationErrors,
       });
     }
 
@@ -1433,13 +1448,21 @@
         return false;
       }
     }
-    state.windows.add(win);
-    setActiveMarker(win, true);
     try {
       syncWindowLock(win);
     } catch (error) {
       state.warnings.push(`lock-sync: ${error}`);
+      setActiveMarker(win, false);
+      removeContextMenuHook(win);
+      removeCloseHook(win);
+      removeDropHook(win);
+      try {
+        delete win[MARKER];
+      } catch {}
+      return false;
     }
+    state.windows.add(win);
+    setActiveMarker(win, true);
     return true;
   }
 
@@ -1470,7 +1493,10 @@
           subject.addEventListener(
             "load",
             () => {
-              if (state.installed) attachWindow(subject);
+              if (!state.installed) return;
+              if (!attachWindow(subject)) {
+                state.warnings.push("window-attach-failed");
+              }
             },
             { once: true }
           );

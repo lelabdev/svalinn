@@ -27,6 +27,7 @@ function makeWindow({
   const win = {
     name,
     closed: false,
+    document: makeFakeDocument(),
     listeners,
     gBrowser: {
       tabs,
@@ -670,10 +671,10 @@ function makeDropEnvironment() {
 
 async function installDropEnvironment(options = {}) {
   const env = makeDropEnvironment();
-  const { api, services } = await makeContext({ windows: [env.win] });
+  const { api, services, prefStore } = await makeContext({ windows: [env.win] });
   const report = await api.install({ enabled: true, ...options });
   assert.equal(report.status, "installed");
-  return { ...env, api, services };
+  return { ...env, api, services, prefStore };
 }
 
 function showContextMenu(env, tab) {
@@ -914,6 +915,132 @@ test("failed lock changes do not claim a new state", async () => {
   }
   assert.equal(env.api.locked(), false);
   assert.equal(env.services.prefs.getBoolPref("svalinn.locked", true), false);
+});
+
+test("a marker failure rolls back unlock and is not reported as success", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const docElement = env.document.documentElement;
+  const originalToggle = docElement.toggleAttribute;
+  docElement.toggleAttribute = () => {
+    throw new Error("marker denied");
+  };
+
+  const failed = env.api.setLocked(false);
+  assert.equal(failed.status, "error");
+  assert.equal(failed.reason, "lock-sync");
+  assert.equal(failed.locked, true);
+  assert.equal(env.api.locked(), true);
+  assert.equal(env.prefStore["svalinn.locked"], true);
+  assert.equal(docElement.hasAttribute("svalinn-unlocked"), false);
+  assert.ok(failed.restorationErrors.length > 0);
+
+  showContextMenu(env, pinned);
+  assert.equal(
+    env.document.getElementById("context_svalinn-protect").checked,
+    true
+  );
+
+  docElement.toggleAttribute = originalToggle;
+  assert.equal(env.api.setLocked(false).status, "unlocked");
+  assert.equal(docElement.hasAttribute("svalinn-unlocked"), true);
+});
+
+test("a later-window marker failure rolls back every window", async () => {
+  const first = makeDropEnvironment();
+  const second = makeDropEnvironment();
+  const windows = [first.win, second.win];
+  const { api, prefStore } = await makeContext({ windows });
+  await api.install({ enabled: true });
+
+  const firstPinned = first.addTab("https://first.test", { pinned: true });
+  const secondPinned = second.addTab("https://second.test", { pinned: true });
+  showContextMenu({ ...first, api }, firstPinned);
+  showContextMenu({ ...second, api }, secondPinned);
+
+  const secondToggle = second.document.documentElement.toggleAttribute;
+  second.document.documentElement.toggleAttribute = () => {
+    throw new Error("second marker denied");
+  };
+
+  const failed = api.setLocked(false);
+  assert.equal(failed.status, "error");
+  assert.equal(api.locked(), true);
+  assert.equal(prefStore["svalinn.locked"], true);
+  for (const env of [first, second]) {
+    assert.equal(
+      env.document.documentElement.hasAttribute("svalinn-unlocked"),
+      false
+    );
+    assert.equal(
+      env.document.getElementById("context_svalinn-protect").checked,
+      true
+    );
+  }
+
+  second.document.documentElement.toggleAttribute = secondToggle;
+  assert.equal(api.setLocked(false).status, "unlocked");
+
+  second.document.documentElement.toggleAttribute = () => {
+    throw new Error("second marker denied on relock");
+  };
+  const relockFailed = api.setLocked(true);
+  assert.equal(relockFailed.status, "error");
+  assert.equal(api.locked(), false);
+  assert.equal(prefStore["svalinn.locked"], false);
+  for (const env of [first, second]) {
+    assert.equal(
+      env.document.documentElement.hasAttribute("svalinn-unlocked"),
+      true
+    );
+  }
+
+  second.document.documentElement.toggleAttribute = secondToggle;
+  assert.equal(api.setLocked(true).status, "locked");
+});
+
+test("a window whose lock marker cannot be applied is not attached", async () => {
+  const env = makeDropEnvironment();
+  env.document.documentElement.toggleAttribute = () => {
+    throw new Error("marker denied");
+  };
+  const { api } = await makeContext({ windows: [env.win] });
+
+  const report = await api.install({ enabled: true });
+  assert.equal(report.status, "unsupported");
+  assert.equal(report.reason, "window-hook-install-failed");
+  assert.equal(env.win.__svalinn, undefined);
+  assert.equal(api.snapshot().installed, false);
+  assert.equal(api.snapshot().windows[0].hooked, false);
+  assert.equal(
+    env.document.documentElement.hasAttribute("svalinn-active"),
+    false
+  );
+});
+
+test("a new window with a failing lock marker is not attached", async () => {
+  const first = makeDropEnvironment();
+  const windows = [first.win];
+  const { api, observers } = await makeContext({ windows });
+  await api.install({ enabled: true });
+
+  const second = makeDropEnvironment();
+  second.document.documentElement.toggleAttribute = () => {
+    throw new Error("marker denied");
+  };
+  windows.push(second.win);
+  observers[0].observer.observe(second.win, "domwindowopened");
+  second.win.dispatchEvent({ type: "load" });
+
+  assert.equal(second.win.__svalinn, undefined);
+  assert.equal(
+    api.snapshot().windows.filter(window => window.hooked).length,
+    1
+  );
+  assert.match(
+    api.snapshot().warnings.join("\n"),
+    /lock-sync|window-attach-failed/
+  );
 });
 
 test("the chosen lock state persists and defaults to locked", async () => {
