@@ -1,5 +1,7 @@
 # Svalinn
 
+[![CI](https://github.com/lelabdev/svalinn/actions/workflows/ci.yml/badge.svg)](https://github.com/lelabdev/svalinn/actions/workflows/ci.yml)
+
 **Tab Guardian for Zen Browser** — protect Essentials and Pinned tabs against accidental removal.
 
 ## Intended behavior
@@ -8,8 +10,8 @@
 | --- | --- |
 | Close an Essential or Pinned (X, middle click, Ctrl+W, context menu) | Block |
 | Remove from Essentials / Unpin | Blocked by default; explicit per-tab command allows one action |
-| Drag protected tab to another category | Duplicate into target; preserve original |
-| Drag protected tab to another window | Duplicate; preserve original |
+| Drag protected tab to another category / window / out of the window | Block by default; source and category preserved |
+| Optional `protectedDragBehavior=duplicate` | Copy safe single-tab cross-category transitions; source preserved |
 | Reorder within its own category | Allow |
 | Unload protected tab | Allow |
 | Explicit per-tab Unpin / Remove from Essentials command | Allow that one intentional action; no timer or global unlock |
@@ -20,9 +22,13 @@
 **Close/unpin/removal protection, explicit per-tab unpin/removal, lifecycle-safe close/menu hiding, and drag category protection (block by default, optional duplication) implemented and smoke-tested.**
 
 - `src/policy.mjs`: dependency-free, testable protection rules.
-- `tests/`: policy regression tests plus adapter, capability, close-guard,
-  drop-guard, intentional-action, CSS-scope, bundling, and protocol tests. Run
-  with `npm test`.
+- `tests/`: policy matrix plus adapter, capability, close-guard, drop-guard,
+  intentional-action, CSS-scope, bundling, and protocol tests. Run with
+  `npm test`.
+- `.github/workflows/ci.yml`: GitHub Actions runs `npm test` and `npm run check`
+  on Node 22 and 24 for `main` pushes and every pull request.
+- `docs/manual-zen-checklist.md`: disposable-profile manual gesture checklist.
+  Start a session with `npm run zen:manual`.
 - `src/zen/`: privileged adapter with close/demotion guards, default-block drag
   protection, optional copy-on-drop, lifecycle-scoped close/menu UI, per-tab
   intentional actions, and a Marionette smoke harness.
@@ -79,6 +85,23 @@ safety, restart, then deletes the profile. It never patches
 `/opt/zen-browser-bin` and never uses `~/.zen`. See
 [`docs/zen-integration.md`](docs/zen-integration.md) for the mechanism, manual
 smoke matrix, security model, and rollback steps.
+
+## Testing and CI
+
+```bash
+npm test                 # Node VM/policy adapter tests
+npm run check            # syntax checks + full test suite
+npm run zen:smoke        # disposable real-Zen smoke (windowed/headless by flag)
+npm run zen:manual       # disposable profile for the manual checklist
+```
+
+GitHub Actions runs the Node test/syntax checks automatically on every pull
+request and on `main` pushes (Node 22 and 24). Browser smoke and the manual
+gesture matrix are not run in CI because they require a real Zen binary and
+display. `zen:manual` canonicalizes symlinked profile paths, refuses `~/.zen`
+before writing, and exits nonzero unless the adapter is installed with active
+guards. The expected manual outcomes and the remaining unautomated cases are
+documented in [`docs/manual-zen-checklist.md`](docs/manual-zen-checklist.md).
 
 
 ## Potential upstream contribution to Zen Browser

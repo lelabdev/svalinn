@@ -464,6 +464,29 @@ npm run zen:smoke
   duplication failures, Essential rejection, and no source-tab mutation
 - injection bundling, CSS marker scoping, and Marionette framing/error handling
 
+### CI and manual coverage
+
+GitHub Actions (`.github/workflows/ci.yml`) runs `npm test` and `npm run check`
+on Node 22 and 24 for every pull request and every push to `main`. A failing
+policy, adapter, syntax, or bundling test fails the workflow. Browser smoke and
+manual gesture checks are intentionally outside CI because they require a real
+Zen binary and display.
+
+A disposable-profile manual checklist lives in
+[`manual-zen-checklist.md`](manual-zen-checklist.md). Start it with:
+
+```bash
+npm run zen:manual -- --keep-profile
+```
+
+The launcher canonicalizes the intended profile path (including symlinked
+ancestors and missing final targets), refuses the real `~/.zen` before any write,
+creates a temporary profile, copies `userChrome.css`, verifies `moz:profile`,
+installs the adapter for that session only, and requires `status === "installed"`
+with active drop/close hooks before printing the checklist. It exits nonzero on
+startup/capability/install/hook failures. It never patches
+`/opt/zen-browser-bin` and never edits the daily profile.
+
 `npm run zen:smoke` is the integration check against a real Zen process. It
 covers startup, pre-install CSS being inert, capability probing, install/uninstall,
 close/unpin/removal guards, mixed multi-close, Zen's close shortcut, unloading,
@@ -548,6 +571,36 @@ profile using xdotool (X11/XWayland), not direct API calls:
   membership snapshots, folder-to-folder membership through the native drop
   handler, out-of-window detachment blocking/invariants, failure cleanup, close
   guards, restart, and shutdown.
+
+## Issue #6 acceptance
+
+- **Automated PR CI.** `.github/workflows/ci.yml` runs `npm test` and
+  `npm run check` for every pull request and every push to `main` on Node 22 and
+  24; failures fail the workflow.
+- **Policy and adapter regression coverage.** The policy matrix covers all tab
+  types, actions, lock states, drop zones/windows and unsupported targets.
+  Adapter tests cover copy failures at null/move/category stages, restore timeout,
+  authorization cleanup, reinstall defaults, and prove the original tab is never
+  removed or recategorized.
+- **No live-profile dependency.** Node tests use VM/fakes and temporary filesystem
+  fixtures only. The smoke and manual launchers resolve real symlink destinations
+  and reject `~/.zen` before any write, verify `moz:profile`, and use temp
+  profiles.
+- **Manual checkout fails closed.** `npm run zen:manual` requires a ready Zen
+  session, `status === "installed"`, at least one attached window, and active
+  drop/close hooks before printing the checklist. Startup/capability/version/hook
+  failures exit nonzero with the reported reason.
+- **Manual checklist.** `docs/manual-zen-checklist.md` gives visible expected
+  outcomes for close X, middle click, `Ctrl+W`, context menus, drag/drop,
+  unloading, restart/session restore, workspaces/containers, multi-window,
+  themes/layouts, and rollback.
+- **Remaining unautomated cases.** The checklist explicitly lists physical OS
+  drag-out for group/split/mixed sources, visual theme/Zen Mods combinations,
+  workspace switching mid-drag, and persistent installation as not fully
+  automated.
+- **Version prerequisites.** Zen 1.23.4b and Node 22+ are stated in the checklist
+  and integration documentation; newer Zen versions fail capability/version
+  checks until revalidated.
 
 ## Known limitations
 
