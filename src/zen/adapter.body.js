@@ -655,12 +655,28 @@
    * Replace the tab strip's drop handler for one window.
    * @returns {boolean} false when the expected Zen internals are missing.
    */
+  function detachMembers(win, contextTab) {
+    const gBrowser = win?.gBrowser;
+    let movingTabs;
+    try {
+      movingTabs = contextTab?.multiselected
+        ? gBrowser?.selectedElements ?? gBrowser?.selectedTabs ?? []
+        : [contextTab];
+    } catch {
+      movingTabs = [contextTab];
+    }
+    return collectMovingTabs(win, contextTab, movingTabs);
+  }
+
   function installDropHook(win) {
     const dnd = win?.gBrowser?.tabContainer?.tabDragAndDrop;
     if (!dnd || typeof dnd.handle_drop !== "function") return false;
+    if (typeof win.gBrowser.replaceTabsWithWindow !== "function") return false;
     if (dnd[DROP_HOOK]) return true;
 
     const original = dnd.handle_drop;
+    const originalReplaceTabsWithWindow =
+      win.gBrowser.replaceTabsWithWindow;
     const restoredListener = event => {
       const tab = event?.target;
       if (!tab) return;
@@ -712,13 +728,45 @@
       return undefined;
     };
 
+    const patchedReplaceTabsWithWindow = function (contextTab, options) {
+      if (!state.installed || !state.enabled) {
+        return originalReplaceTabsWithWindow.call(this, contextTab, options);
+      }
+      const collection = detachMembers(win, contextTab);
+      if (collection.uncertain) {
+        state.warnings.push(
+          `detach-blocked:uncertain-members:${collection.uncertain}`
+        );
+        return null;
+      }
+      if (
+        collection.tabs.some(tab => isProtected(readTabFlags(tab)))
+      ) {
+        state.warnings.push("detach-blocked:protected-tab");
+        return null;
+      }
+      return originalReplaceTabsWithWindow.call(
+        this,
+        contextTab,
+        options
+      );
+    };
+
     Object.defineProperty(dnd, DROP_HOOK, {
-      value: { original, patched, restoredListener, unloadListener },
+      value: {
+        original,
+        patched,
+        restoredListener,
+        unloadListener,
+        originalReplaceTabsWithWindow,
+        patchedReplaceTabsWithWindow,
+      },
       configurable: true,
       writable: false,
       enumerable: false,
     });
     dnd.handle_drop = patched;
+    win.gBrowser.replaceTabsWithWindow = patchedReplaceTabsWithWindow;
     return true;
   }
 
@@ -739,6 +787,10 @@
         win.removeEventListener("unload", hook.unloadListener);
       }
       dnd.handle_drop = hook.original;
+      if (hook.originalReplaceTabsWithWindow) {
+        win.gBrowser.replaceTabsWithWindow =
+          hook.originalReplaceTabsWithWindow;
+      }
       delete dnd[DROP_HOOK];
     } catch (error) {
       state.warnings.push(`drop-unhook: ${error}`);

@@ -670,7 +670,21 @@ const secondPinned = second.gBrowser.addTab("about:blank", {
 });
 await wait(300);
 second.gBrowser.pinTab(secondPinned);
-await wait(300);
+const sourceReadyDeadline = Date.now() + 5000;
+while (
+  Date.now() < sourceReadyDeadline &&
+  !second.gBrowser.tabs.includes(secondPinned)
+) {
+  await wait(100);
+}
+check(
+  "drag-cross-window-source-ready",
+  second.gBrowser.tabs.includes(secondPinned) && secondPinned.pinned === true,
+  {
+    present: second.gBrowser.tabs.includes(secondPinned),
+    pinned: secondPinned.pinned,
+  }
+);
 const beforeCross = [...gBrowser.tabs].length;
 await dropTab(secondPinned, normalA);
 check(
@@ -682,6 +696,9 @@ check(
     sourcePresent: second.gBrowser.tabs.includes(secondPinned),
     sourcePinned: secondPinned.pinned,
     targetTabCount: [...gBrowser.tabs].length,
+    sourceInFirst: gBrowser.tabs.includes(secondPinned),
+    secondTabCount: second.gBrowser.tabs.length,
+    sourceWindowMatches: secondPinned.documentGlobal === second,
   }
 );
 second.close();
@@ -1121,6 +1138,164 @@ return {
   );
 }
 
+async function runDetachScenarios(client, urls) {
+  return runScript(
+    client,
+    `
+const win = [...Services.wm.getEnumerator("navigator:browser")][0];
+const api = globalThis.Svalinn;
+const gBrowser = win.gBrowser;
+const manager = win.gZenPinnedTabManager;
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+const principal = Services.scriptSecurityManager.getSystemPrincipal();
+const base = ${JSON.stringify(urls.normal)};
+let seq = 0;
+const results = [];
+const check = (name, ok, details) => results.push({ name, ok, details });
+const zone = tab =>
+  tab.hasAttribute("zen-essential")
+    ? "essential"
+    : tab.pinned
+      ? "pinned"
+      : "normal";
+const windowCount = () =>
+  [...Services.wm.getEnumerator("navigator:browser")].length;
+
+const makeTab = async ({ pinned = false, essential = false } = {}) => {
+  const tab = gBrowser.addTab(base + "#detach-" + ++seq, {
+    triggeringPrincipal: principal,
+    inBackground: true,
+  });
+  await wait(120);
+  if (pinned || essential) gBrowser.pinTab(tab);
+  await wait(100);
+  if (essential) manager.addToEssentials(tab);
+  await wait(150);
+  return tab;
+};
+
+const dragEnd = async (source, movingTabs = [source]) => {
+  const dataTransfer = new win.DataTransfer();
+  dataTransfer.mozSetDataAt(win.TAB_DROP_TYPE, source, 0);
+  dataTransfer.dropEffect = "none";
+  source._dragData = {
+    movingTabs,
+    movingTabsSet: new Set(movingTabs),
+    fromTabList: false,
+    offsetX: 10,
+    offsetY: 10,
+    screenX: win.screenX,
+    screenY: win.screenY,
+    translateX: 0,
+    translateY: 0,
+    tabWidth: 200,
+    tabHeight: 30,
+  };
+  const event = {
+    dataTransfer,
+    screen: win.screen,
+    screenX: win.screenX + win.outerWidth + 80,
+    screenY: win.screenY + 100,
+    stopPropagation() {},
+    preventDefault() {},
+  };
+  const dnd = gBrowser.tabContainer.tabDragAndDrop;
+  const before = windowCount();
+  dnd.handle_dragend(event);
+  await wait(900);
+  return { before, after: windowCount() };
+};
+
+const pinned = await makeTab({ pinned: true });
+const essential = await makeTab({ essential: true });
+const normal = await makeTab();
+
+const pinnedDetach = await dragEnd(pinned);
+check(
+  "detach-pinned-blocked",
+  pinnedDetach.before === pinnedDetach.after &&
+    gBrowser.tabs.includes(pinned) &&
+    zone(pinned) === "pinned",
+  { ...pinnedDetach, present: gBrowser.tabs.includes(pinned), zone: zone(pinned) }
+);
+
+const essentialDetach = await dragEnd(essential);
+check(
+  "detach-essential-blocked",
+  essentialDetach.before === essentialDetach.after &&
+    gBrowser.tabs.includes(essential) &&
+    zone(essential) === "essential",
+  { ...essentialDetach, present: gBrowser.tabs.includes(essential), zone: zone(essential) }
+);
+
+const folderA = await makeTab({ pinned: true });
+const folderB = await makeTab({ pinned: true });
+const folder = win.gZenFolders.createFolder([folderA, folderB]);
+await wait(700);
+const folderMembers = (folder.tabs ?? []).map(tab => tab.id);
+const folderDetach = await dragEnd(folder, [folder]);
+check(
+  "detach-group-blocked",
+  folderDetach.before === folderDetach.after &&
+    (folder.tabs ?? []).map(tab => tab.id).join(",") === folderMembers.join(",") &&
+    zone(folderA) === "pinned" && zone(folderB) === "pinned",
+  {
+    ...folderDetach,
+    sameMembers:
+      (folder.tabs ?? []).map(tab => tab.id).join(",") === folderMembers.join(","),
+    firstZone: zone(folderA),
+    secondZone: zone(folderB),
+  }
+);
+
+const multiNormal = await makeTab();
+gBrowser.selectedTab = pinned;
+gBrowser.addToMultiSelectedTabs(pinned);
+gBrowser.addToMultiSelectedTabs(multiNormal);
+const multiMembers = [pinned, multiNormal];
+const multiDetach = await dragEnd(pinned, multiMembers);
+gBrowser.clearMultiSelectedTabs();
+check(
+  "detach-multi-blocked",
+  multiDetach.before === multiDetach.after &&
+    gBrowser.tabs.includes(pinned) &&
+    gBrowser.tabs.includes(multiNormal) &&
+    zone(pinned) === "pinned" &&
+    zone(multiNormal) === "normal",
+  {
+    ...multiDetach,
+    pinnedPresent: gBrowser.tabs.includes(pinned),
+    normalPresent: gBrowser.tabs.includes(multiNormal),
+  }
+);
+
+const detachedNormal = await makeTab();
+const beforeNormal = windowCount();
+const newWindow = gBrowser.replaceTabsWithWindow(detachedNormal);
+await wait(1200);
+check(
+  "detach-normal-native",
+  Boolean(newWindow) && windowCount() === beforeNormal + 1,
+  {
+    returned: Boolean(newWindow),
+    before: beforeNormal,
+    after: windowCount(),
+  }
+);
+try {
+  newWindow?.close();
+} catch {}
+await wait(800);
+
+return {
+  results,
+  windows: windowCount(),
+  warnings: api.snapshot().warnings,
+};`,
+    { timeoutMs: 90_000 }
+  );
+}
+
 async function runCloseProtectionScenarios(client, urls) {
   return runScript(
     client,
@@ -1433,6 +1608,18 @@ check(
   { pinned: intentPinned.pinned, zone: zone(intentPinned) }
 );
 
+check(
+  "intent-essential-ready",
+  intentEssential.hasAttribute("zen-essential") &&
+    intentEssential.pinned === true,
+  {
+    essential: intentEssential.hasAttribute("zen-essential"),
+    pinned: intentEssential.pinned,
+    activeWorkspace: win.gZenWorkspaces.activeWorkspace,
+    tabWorkspace: intentEssential.getAttribute("zen-workspace-id"),
+  }
+);
+await wait(250);
 await showMenuFor(intentEssential);
 check(
   "intent-menu-essential",
@@ -1764,6 +1951,17 @@ return { display, activeMarker };
       "active-marker-installed",
       cssMenuChecks.activeMarker === true,
       { activeMarker: cssMenuChecks.activeMarker }
+    );
+
+    phase = "drag-detach";
+    const detachChecks = await runDetachScenarios(client, profileInfo.urls);
+    for (const result of detachChecks.results) {
+      record(result.name, result.ok, result.details);
+    }
+    record(
+      "drag-detach-windows-clean",
+      detachChecks.windows === 1,
+      { windows: detachChecks.windows }
     );
 
     const afterDropSnapshot = await runAdapter(client, `return api.snapshot();`);

@@ -286,6 +286,25 @@ The invariant is: while protected and locked, a drop can never silently close,
 detach, unpin, remove Essential status, or turn the original into Normal. Safe
 same-category organization is still allowed.
 
+### Out-of-window detachment
+
+Releasing a tab outside the window does not go through `handle_drop`; Firefox and
+Zen reach `gBrowser.replaceTabsWithWindow` from `handle_dragend`. Svalinn wraps
+that entry point per window and reuses the same protected-member resolver:
+
+- protected Pinned/Essential tabs, group/folder labels containing protected
+  members, split views, and mixed selections are blocked from detaching;
+- native `handle_dragend` still executes for animation/visibility/drag-state
+  cleanup;
+- normal tabs are delegated to the original `replaceTabsWithWindow` and keep
+  native new-window detachment;
+- uninstall restores the original method.
+
+A real-input xdotool run on Zen 1.23.4b verified dragging Pinned and Essential
+tabs outside the window: no new window, source tab/window/category unchanged,
+and `detach-blocked:protected-tab` recorded. Dragging a Normal tab out created a
+new window and cleaned up normally.
+
 ### Optional duplicate mode
 
 The merged copy-on-drop path from #2 is retained as an opt-in mode:
@@ -322,7 +341,12 @@ How the guard works:
    Essentials, multi-tab/group, split-view, and unknown-target drops are consumed:
    native demotion/adoption is not called and the source remains in its original
    category/workspace/container.
-7. In duplicate mode, only a single protected tab crossing a category is copied.
+7. Out-of-window detach is guarded separately: the per-window
+   `gBrowser.replaceTabsWithWindow` entry point is wrapped so a protected tab,
+   group label, split view, or mixed selection returns without migration. Zen's
+   native `handle_dragend` still runs for cleanup/visuals; normal-tab detach
+   delegates unchanged.
+8. In duplicate mode, only a single protected tab crossing a category is copied.
    The destination zone is applied after `SSTabRestored`; a nonempty tab id is not
    proof of restoration. Pending copies are cancelled on uninstall/window detach,
    and failures remove the copy while keeping the source.
@@ -432,7 +456,9 @@ npm run zen:smoke
   optional duplication mode, multi-selection/cross-window/group fail-closed
   behavior, source/destination workspace and container provenance, group-label
   expansion (including normal-origin labels), split-view source/target handling,
-  unreadable group membership, same-zone native reordering, event-driven lazy
+  out-of-window detachment blocking for tab/group/split/mixed sources and native
+  normal-tab detachment, unreadable group membership, same-zone native reorder,
+  event-driven lazy
   SessionStore restoration (including a nonempty-id false signal), restore
   timeout, unknown and throwing targets, planning errors, uninstall cancellation,
   duplication failures, Essential rejection, and no source-tab mutation
@@ -450,7 +476,8 @@ non-default container workspace, container-specific Essentials incompatibility,
 group-label moves with before/after membership snapshots, split-view
 source/target drops with group-membership invariants, a real multi-selected
 same-category reorder using Zen's selection state, folder-to-folder membership
-through the native drop handler, optional duplicate mode with non-default
+through the native drop handler, protected and normal out-of-window dragend
+detachment checks, optional duplicate mode with non-default
 container identity, duplication failure/internal pages, same-zone and normal-tab
 dragging, deletion-safe failure paths, an unknown-target negative control,
 delayed-restore cancellation by uninstall, reinstall after cancellation,
@@ -510,12 +537,17 @@ profile using xdotool (X11/XWayland), not direct API calls:
   reach native demotion/adoption. Source and destination workspace/container
   provenance is checked before delegation.
 - **Non-protected tabs keep native behavior.**
+- **Out-of-window detachment is blocked for protected sources.** The
+  `replaceTabsWithWindow` path reached from native `handle_dragend` is guarded for
+  tabs, group labels, split views, and mixed selections; native dragend cleanup
+  still runs, and normal-tab detachment remains native.
 - **Coverage.** Automated adapter tests and the real Zen smoke suite exercise
   block mode, duplicate mode, safe same-zone/folder moves, multi-selection,
   cross-window, two real workspaces, non-default container tabs,
   container-specific Essentials, group labels, split-view source/target with
   membership snapshots, folder-to-folder membership through the native drop
-  handler, failure cleanup, close guards, restart, and shutdown.
+  handler, out-of-window detachment blocking/invariants, failure cleanup, close
+  guards, restart, and shutdown.
 
 ## Known limitations
 
@@ -537,6 +569,7 @@ profile using xdotool (X11/XWayland), not direct API calls:
 - Default drag behavior is `block`. Optional `duplicate` mode only copies a
   single protected tab in the same window; cross-window, group/split-view,
   workspace, and multi-tab transitions still fail closed.
+- Protected tabs cannot be detached out of the window; normal tabs still use native new-window detachment.
 - Same-category delegation requires matching source/destination workspace and,
   for Essentials, container context; split-view or ambiguous group membership
   blocks instead of moving.

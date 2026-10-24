@@ -21,6 +21,7 @@ function makeScope(overrides = {}) {
       removeTab() {},
       removeTabs() {},
       removeCurrentTab() {},
+      replaceTabsWithWindow() {},
       moveTabsBefore() {},
       moveTabTo() {},
       tabContainer: { tabDragAndDrop: { handle_drop() {} } },

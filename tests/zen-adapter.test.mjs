@@ -37,6 +37,7 @@ function makeWindow({
       removeTab() {},
       removeTabs() {},
       removeCurrentTab() {},
+      replaceTabsWithWindow() {},
       moveTabsBefore() {},
       moveTabTo() {},
       tabContainer: {
@@ -409,6 +410,7 @@ function makeDropEnvironment() {
     unpinCalls: 0,
     removeEssentialsCalls: 0,
     unloadCalls: 0,
+    detachCalls: 0,
   };
   const tabs = [];
   const win = {};
@@ -499,6 +501,12 @@ function makeDropEnvironment() {
       stats.removeCurrentTabCalls += 1;
       this.removeTab(this.selectedTab);
     },
+    replaceTabsWithWindow(tab) {
+      stats.detachCalls += 1;
+      return { adopted: tab };
+    },
+    selectedElements: [],
+    selectedTabs: [],
     removeTabGroup(group) {
       stats.removeGroupCalls += 1;
       this.removeTabs(group.tabs);
@@ -1387,6 +1395,79 @@ test("unreadable group membership fails closed", async () => {
 
   assert.equal(env.stats.nativeDrops, 0);
   assert.equal(env.stats.duplicateCalls, 0);
+});
+
+test("detachment of protected tabs is blocked before native migration", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const essential = env.addTab("https://essential.test", {
+    pinned: true,
+    essential: true,
+  });
+  const normal = env.addTab("https://normal.test");
+
+  assert.equal(env.win.gBrowser.replaceTabsWithWindow(pinned), null);
+  assert.equal(env.win.gBrowser.replaceTabsWithWindow(essential), null);
+  assert.equal(env.stats.detachCalls, 0);
+  assert.ok(env.tabs.includes(pinned));
+  assert.ok(env.tabs.includes(essential));
+
+  assert.notEqual(env.win.gBrowser.replaceTabsWithWindow(normal), null);
+  assert.equal(env.stats.detachCalls, 1);
+});
+
+test("group, split and multi-selection detachments fail closed", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const essential = env.addTab("https://essential.test", {
+    pinned: true,
+    essential: true,
+  });
+  const normal = env.addTab("https://normal.test");
+
+  const groupLabel = {
+    id: "detach-group",
+    isTabGroupLabel: true,
+    group: { tabs: [pinned, normal] },
+    documentGlobal: env.win,
+  };
+  assert.equal(env.win.gBrowser.replaceTabsWithWindow(groupLabel), null);
+
+  const splitWrapper = {
+    id: "detach-split",
+    isSplitViewWrapper: true,
+    tabs: [essential],
+    documentGlobal: env.win,
+  };
+  assert.equal(env.win.gBrowser.replaceTabsWithWindow(splitWrapper), null);
+
+  pinned.multiselected = true;
+  normal.multiselected = true;
+  env.win.gBrowser.selectedElements = [pinned, normal];
+  assert.equal(env.win.gBrowser.replaceTabsWithWindow(pinned), null);
+  pinned.multiselected = false;
+  normal.multiselected = false;
+  env.win.gBrowser.selectedElements = [];
+
+  const brokenLabel = {
+    id: "detach-broken",
+    isTabGroupLabel: true,
+    group: {},
+    documentGlobal: env.win,
+  };
+  assert.equal(env.win.gBrowser.replaceTabsWithWindow(brokenLabel), null);
+  assert.equal(env.stats.detachCalls, 0);
+  assert.ok(env.tabs.includes(pinned));
+  assert.ok(env.tabs.includes(essential));
+});
+
+test("uninstall restores native tab detachment", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+
+  env.api.uninstall();
+  assert.notEqual(env.win.gBrowser.replaceTabsWithWindow(pinned), null);
+  assert.equal(env.stats.detachCalls, 1);
 });
 
 test("uninstall restores the native drop handler", async () => {

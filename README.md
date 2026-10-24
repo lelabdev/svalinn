@@ -47,8 +47,9 @@ Zen Mods are CSS-only. A true guard requires a privileged integration with brows
   from Essentials**. Each runs the native action for that single tab only, under
   a per-action authorization that ends with the call; no timer or global unlock.
 - Protected category is preserved on drag. Default behavior blocks
-  category-changing/cross-window/multi-tab/unsafe drops; same-category reordering
-  and safe folder moves stay native. Copy-on-drop is optional
+  category-changing/cross-window/multi-tab/unsafe drops and out-of-window
+  detachment; same-category reordering and safe folder moves stay native.
+  Normal-tab detachment remains native. Copy-on-drop is optional
   (`svalinn.protectedDragBehavior = duplicate`):
 
 | Drag | Result |
@@ -72,8 +73,9 @@ state, intentional unpin/Remove-from-Essentials commands, uninstall restoring
 native affordances, default drag blocking, multi/folder/cross-window safety,
 two real workspaces, a non-default container, container-specific Essentials,
 group-label and split-view drops, folder-to-folder membership, multi-tab reorder,
-optional duplicate mode with non-default container identity, same-zone/normal-tab
-behavior, failure safety, restart, then deletes the profile. It never patches
+protected/normal out-of-window detached dragend paths, optional duplicate mode
+with non-default container identity, same-zone/normal-tab behavior, failure
+safety, restart, then deletes the profile. It never patches
 `/opt/zen-browser-bin` and never uses `~/.zen`. See
 [`docs/zen-integration.md`](docs/zen-integration.md) for the mechanism, manual
 smoke matrix, security model, and rollback steps.
