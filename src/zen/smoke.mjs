@@ -24,7 +24,7 @@ import {
   assertDisposableProfile,
   sameRealPath,
 } from "./profile.mjs";
-import { detectInstallRoot, install as installPersistent } from "./install-lib.mjs";
+import { assertDisposableInstallRoot, detectInstallRoot, install as installPersistent } from "./install-lib.mjs";
 
 const SANDBOX = "svalinn-smoke";
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -1881,6 +1881,7 @@ export async function runSmoke(options) {
       const root = options.installRoot
         ? options.installRoot
         : (await detectInstallRoot()).root;
+      await assertDisposableInstallRoot(root);
       const installedFiles = await installPersistent({
         profile: profileInfo.profile,
         installRoot: root,
@@ -2373,7 +2374,8 @@ Options:
   --skip-restart      Skip the restart/session-restore phase
   --installed         Test a persistent autoconfig installation instead of
                       injecting through Marionette
-  --install-root <dir> Zen installation root used with --installed
+  --install-root <dir> Disposable COPY of a Zen installation for --installed
+                      (the live installation is refused)
   --skip-preflight    Skip the no-Marionette startup check (installed mode)
   --port <n>          Marionette port (default: 2828)
   --timeout <ms>      Startup/connect timeout (default: 60000)

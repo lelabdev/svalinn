@@ -102,7 +102,7 @@ test("autoconfig conflict detection ignores only Svalinn's own pref file", async
     await fs.mkdir(prefDir, { recursive: true });
     await fs.writeFile(
       path.join(prefDir, "svalinn-autoconfig.js"),
-      'pref("general.config.filename", "svalinn.cfg");\n'
+      '// Svalinn managed autoconfig entry point.\npref("general.config.filename", "svalinn.cfg");\n'
     );
     assert.deepEqual(await findAutoconfigConflict(zen), []);
 

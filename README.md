@@ -48,10 +48,11 @@ loaders, without depending on Sine) plus a trusted loader in the profile. It is
 not a published extension and does not use Marionette while browsing.
 
 ```bash
-# Test against a copied installation first; /opt and ~/.zen stay untouched.
+# Test against a copied installation first; any supplied root is copied.
 npm run zen:installed-smoke
+node src/zen/installed-smoke.mjs --install-root /tmp/opencode/zen-copy
 
-# Install/update into an explicit profile.
+# Install/update into the resolved leaf profile, not the ~/.zen container.
 node src/zen/install.mjs --profile /path/to/profile \
   --install-root /opt/zen-browser-bin
 
@@ -64,14 +65,21 @@ node src/zen/install.mjs --profile /path/to/profile --install-root /opt/zen-brow
   --command uninstall
 ```
 
-The installer backs up `user.js`, `chrome/userChrome.css` and affected
-browser/profile files before writing, requires `--confirm-daily` for `~/.zen`,
-refuses an existing different autoconfig loader, and fails closed on unverified
-Zen versions. Installation changes only `svalinn.cfg` and
-`defaults/pref/svalinn-autoconfig.js` in the installation root; no `/opt` patch
-is performed during development or smoke tests. See
+The installer resolves an explicit `profiles.ini` container to its unique default
+leaf profile and rejects an ambiguous container instead of writing into it. It
+backs up `user.js`, `chrome/userChrome.css` and the affected installation-root
+files before writing; the shared bootloader is activated last and restored if any
+write fails. It requires `--confirm-daily` for profiles under `~/.zen`, refuses
+foreign autoconfig files or loaders unless `--force` is reviewed, refuses
+mismatched or malformed rollback backups, and fails closed on unverified Zen
+versions. Installation changes only `svalinn.cfg`,
+`defaults/pref/svalinn-autoconfig.js`, and a small `svalinn-registry.json` in the
+installation root; the two loader files are shared and remain while another
+registered profile still uses Svalinn. No `/opt` patch is performed during
+development or smoke tests. See
 [`docs/persistent-install.md`](docs/persistent-install.md) for the full model,
-status prefs, backups, rollback, sudo ownership handling, and troubleshooting.
+multi-profile behavior, status prefs, backups, rollback, sudo ownership handling,
+and troubleshooting.
 
 ## Verification
 
@@ -102,6 +110,7 @@ loaded adapter, including restart/session restore:
 ```bash
 npm run zen:installed-smoke                 # headless, temporary install copy
 npm run zen:installed-smoke -- --headed     # visible window
+# --install-root selects the SOURCE tree; it is always copied before mutation.
 npm run zen:installed-smoke -- --install-root /tmp/opencode/zen-copy
 ```
 

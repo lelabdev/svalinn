@@ -21,6 +21,7 @@ import path from "node:path";
 import {
   detectInstallRoot,
   install,
+  resolveProfileTarget,
   rollback,
   status,
   uninstall,
@@ -45,19 +46,27 @@ Commands (--command <name>):
   status      Report installation state
 
 Options:
-  --profile <dir>           Zen profile directory (required)
-  --confirm-daily           Required when --profile is ~/.zen or inside it
+  --profile <dir>           Zen PROFILE directory, not the profiles.ini container
+  --confirm-daily           Required when the resolved profile is ~/.zen or inside it
   --install-root <dir>      Zen installation root (default: auto-detect)
   --backup <dir>            Backup directory for rollback
   --enabled / --disabled    Managed svalinn.enabled value (default enabled)
   --drag-behavior <mode>    block (default) or duplicate
   --allow-unverified-version  Allow installation outside Zen 1.23.x
-  --force                   Replace an existing autoconfig loader
+  --force                   Replace a foreign autoconfig loader after review
   --json                    Machine-readable result
   -h, --help                Show this help
 
+If --profile points at a directory containing profiles.ini, the installer
+resolves the unique default profile; an ambiguous container is rejected.
+Find leaf profiles in ~/.zen/profiles.ini and pass the path of the profile you
+actually use (for example ~/.zen/<random>.default).
+
+The installation-root bootloader is shared by every registered profile.
+Removing Svalinn from one profile keeps it active for the others.
+
 The installer never edits tabs/session data and never runs Zen. Installation
-directory changes are limited to two small files and require write permission.
+directory changes are limited to two small files plus an ownership registry.
 `);
 }
 
@@ -157,6 +166,7 @@ async function chownTree(target, uid, gid) {
     if (error?.code === "ENOENT") return;
     throw error;
   }
+  if (stat.isSymbolicLink()) return;
   if (stat.isDirectory()) {
     for (const entry of await fs.readdir(target)) {
       await chownTree(path.join(target, entry), uid, gid);
@@ -170,6 +180,8 @@ async function restoreUserOwnership(profile) {
   const uid = Number(process.env.SUDO_UID);
   const gid = Number(process.env.SUDO_GID);
   if (!Number.isInteger(uid) || !Number.isInteger(gid)) return;
+  // Only the profile's managed paths are handed back. Never recurse over the
+  // whole ~/.zen container or unrelated profiles.
   for (const target of [
     path.join(profile, "user.js"),
     path.join(profile, "chrome"),
@@ -216,7 +228,15 @@ async function main() {
   if (!options.profile) {
     throw new InstallError("--profile is required");
   }
-  await assertDailyConfirmation(options.profile, options.confirmDaily);
+
+  const target = await resolveProfileTarget(options.profile);
+  if (target.container) {
+    console.error(
+      `Resolved profile container ${target.container} -> ${target.profile} ` +
+        `(${target.selectedBy}).`
+    );
+  }
+  await assertDailyConfirmation(target.profile, options.confirmDaily);
 
   let installation = null;
   if (!options.installRoot) {
@@ -227,38 +247,45 @@ async function main() {
     : installation.root;
 
   let result;
-  if (options.command === "install" || options.command === "update") {
-    result = await install({
-      profile: options.profile,
-      installRoot,
-      enabled: options.enabled,
-      dragBehavior: options.dragBehavior,
-      allowUnverifiedVersion: options.allowUnverifiedVersion,
-      force: options.force,
-    });
-  } else if (options.command === "uninstall") {
-    result = await uninstall({
-      profile: options.profile,
-      installRoot,
-    });
-  } else if (options.command === "rollback") {
-    const backupDir =
-      options.backup ?? (await latestBackup(options.profile));
-    if (!backupDir) throw new InstallError("No Svalinn backup found");
-    result = await rollback({
-      backupDir,
-      installRoot,
-      profile: options.profile,
-    });
-  } else {
-    result = await status({
-      profile: options.profile,
-      installRoot,
-    });
+  try {
+    if (options.command === "install" || options.command === "update") {
+      result = await install({
+        profile: target.profile,
+        installRoot,
+        enabled: options.enabled,
+        dragBehavior: options.dragBehavior,
+        allowUnverifiedVersion: options.allowUnverifiedVersion,
+        force: options.force,
+      });
+    } else if (options.command === "uninstall") {
+      result = await uninstall({
+        profile: target.profile,
+        installRoot,
+      });
+    } else if (options.command === "rollback") {
+      const backupDir =
+        options.backup ?? (await latestBackup(target.profile));
+      if (!backupDir) throw new InstallError("No Svalinn backup found");
+      result = await rollback({
+        backupDir,
+        installRoot,
+        profile: target.profile,
+      });
+    } else {
+      result = await status({
+        profile: target.profile,
+        installRoot,
+      });
+    }
+  } catch (error) {
+    if (options.command !== "status") {
+      await restoreUserOwnership(target.profile).catch(() => {});
+    }
+    throw error;
   }
 
   if (options.command !== "status") {
-    await restoreUserOwnership(path.resolve(options.profile));
+    await restoreUserOwnership(target.profile);
   }
 
   if (options.json) {

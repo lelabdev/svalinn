@@ -142,6 +142,7 @@ bootloader and profile loader in a copied installation:
 ```bash
 npm run zen:installed-smoke                 # headless, temporary copy
 npm run zen:installed-smoke -- --headed     # visible window
+# --install-root names a SOURCE tree; the harness always copies it first.
 node src/zen/installed-smoke.mjs --install-root /tmp/opencode/zen-copy
 ```
 
@@ -172,7 +173,8 @@ node src/zen/smoke.mjs --zen /usr/bin/zen-browser --port 2828
 node src/zen/smoke.mjs --headless
 node src/zen/smoke.mjs --skip-restart
 
-# Test an installed copy; skip the no-Marionette preflight only when needed
+# Test an installed copy; --install-root selects the source tree to copy.
+# Skip the no-Marionette preflight only when needed.
 node src/zen/installed-smoke.mjs --install-root /tmp/opencode/zen-copy \
   --skip-preflight
 ```
@@ -540,6 +542,11 @@ npm run zen:installed-smoke
 - installer `user.js` merge/remove idempotence, install-root validation,
   autoconfig conflict detection, backup/install/status/uninstall on temporary
   fixtures, version refusal/override, and rollback restoration
+- profile-container resolution (unique/default/ambiguous leaf selection),
+  cross-profile shared-bootloader ownership and stale-registry retention,
+  foreign root-file refusal, rollback identity/path/hash/duplicate validation,
+  transactional install/update failure recovery, and installed-smoke copy
+  isolation/live-root refusal
 
 ### CI and manual coverage
 
@@ -585,11 +592,12 @@ multi-window attachment, restart/session restore, and shutdown. It is not part o
 `npm test` because it launches a browser.
 
 `npm run zen:installed-smoke` is the persistent-install integration check. It
-copies the Zen installation, installs the autoconfig bootloader and profile
-loader into temporary locations, verifies startup **without Marionette**, then
-runs the same full suite through the loaded adapter, including restart and
-session restore. It never touches `/opt/zen-browser-bin` or `~/.zen` unless an
-explicit `--install-root` points there.
+always copies the Zen installation source (`--zen-root` or `--install-root`),
+installs the autoconfig bootloader and profile loader into the temporary copy,
+verifies startup **without Marionette**, then runs the same full suite through the
+loaded adapter, including restart and session restore. It never touches
+`/opt/zen-browser-bin` or `~/.zen`; the direct smoke harness refuses to install
+into a live root or a symlink alias to it.
 
 A separate **real-input UI matrix** was run against a windowed Zen 1.23.4b test
 profile using xdotool (X11/XWayland), not direct API calls:
@@ -700,9 +708,13 @@ profile using xdotool (X11/XWayland), not direct API calls:
 - **Enable/disable and fallback.** `--disabled` writes the managed pref and
   `--enabled` restores it; changes apply on restart. The adapter fails closed
   (`unsupported`/`not-ready`) and attaches no hooks if Zen internals change.
-- **Non-destructive install.** Backups are created before writes; rollback
-  restores prior files/`user.js`; uninstall leaves browsing data alone; conflicting
-  autoconfig loaders are refused unless explicitly forced.
+- **Non-destructive install.** Complete backups are written before any target is
+  modified; profile assets are staged first and the shared bootloader is activated
+  last, with automatic restore on failure. Rollback validates destination identity,
+  allowed paths, and content hashes before writing. Uninstall leaves browsing data
+  alone, retains the shared bootloader while another profile is registered, and
+  refuses to remove uncertain ownership. Conflicting autoconfig loaders or foreign
+  files are refused unless explicitly forced.
 - **Version guard.** `application.ini` must be a verified 1.23.x line before
   installation unless `--allow-unverified-version` is explicitly used.
 - **Test isolation.** Installer tests use temporary fake Zen roots/profiles.

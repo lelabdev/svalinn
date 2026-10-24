@@ -60,6 +60,9 @@ export function parseArgs(argv) {
       case "--headed":
         options.headless = false;
         break;
+      case "--headless":
+        options.headless = true;
+        break;
       case "--json":
         options.json = true;
         break;
@@ -91,7 +94,7 @@ Usage:
 
 Options:
   --zen-root <dir>     Zen installation to copy (default: /opt/zen-browser-bin)
-  --install-root <dir> Use an existing copy instead of copying zen-root
+  --install-root <dir> Zen installation to copy, instead of --zen-root
   --profile <dir>      New/empty disposable profile directory
   --keep               Keep the copied installation and generated profile
   --headed             Run with a visible window (default: headless)
@@ -102,13 +105,20 @@ Options:
   --json               Print the complete report as JSON
   -h, --help           Show this help
 
-The real /opt installation and ~/.zen profile are never used. The test copies
-the installation directory, installs the autoconfig bootloader there, and
-starts Zen without a debug port before running the standard smoke checks.
+The source installation directory is never modified: it is always copied into
+a disposable temporary location, and Svalinn is installed only in the copy. The
+real /opt installation and ~/.zen profile are never used. Zen is started without
+a debug port before the standard smoke checks run.
 `);
 }
 
-async function copyInstallation(source) {
+/**
+ * Copy a Zen installation tree to a disposable location.
+ *
+ * Callers must treat the source as read-only. Exported for regression tests
+ * that verify the source is byte-for-byte unchanged.
+ */
+export async function copyInstallation(source) {
   const inspected = await inspectInstallRoot(source);
   const copy = await fs.mkdtemp(path.join(os.tmpdir(), "svalinn-zen-install-"));
   await fs.cp(inspected.root, copy, {
@@ -130,17 +140,17 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   let temporaryCopy = null;
-  let installRoot = options.installRoot;
+  let installRoot = null;
   let zenRoot = null;
   try {
-    if (installRoot) {
-      zenRoot = await inspectInstallRoot(installRoot);
-    } else {
-      const copied = await copyInstallation(options.zenRoot);
-      temporaryCopy = copied.copy;
-      zenRoot = copied.root;
-      installRoot = copied.root.root;
-    }
+    // Always copy, even when --install-root is supplied. The argument names a
+    // source tree, never a writable target; this keeps the harness
+    // non-destructive by construction.
+    const source = options.installRoot ?? options.zenRoot;
+    const copied = await copyInstallation(source);
+    temporaryCopy = copied.copy;
+    zenRoot = copied.root;
+    installRoot = copied.root.root;
 
     const report = await runSmoke({
       zen: zenRoot.binary,
