@@ -1,185 +1,104 @@
 # Svalinn
 
 [![CI](https://github.com/lelabdev/svalinn/actions/workflows/ci.yml/badge.svg)](https://github.com/lelabdev/svalinn/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Tab Guardian for Zen Browser** — protect Essentials and Pinned tabs against accidental removal.
+**Tab Guardian for Zen Browser** — keep your Pinned and Essential tabs safe from accidental closing and unwanted removal. Svalinn is free and open source under the [MIT License](LICENSE).
 
-## Intended behavior
+## What works today
 
-| Operation | Locked behavior |
+Svalinn is **already functional** as a persistent personal customization of [Zen Browser](https://zen-browser.app/), not just a proposed feature. The installer and browser integration have been exercised with **Zen 1.23.4b** in disposable profiles and copied installations.
+
+| Action | Current protected behavior |
 | --- | --- |
-| Close an Essential or Pinned (X, middle click, Ctrl+W, context menu) | Block |
-| Remove from Essentials / Unpin | Blocked by default; explicit per-tab command allows one action |
-| Drag protected tab to another category / window / out of the window | Block by default; source and category preserved |
-| Optional `protectedDragBehavior=duplicate` | Copy safe single-tab cross-category transitions; source preserved |
-| Reorder within its own category | Allow |
-| Unload protected tab | Allow |
-| Explicit per-tab Unpin / Remove from Essentials command | Allow that one intentional action; no timer or global unlock |
-| Normal tabs | Keep Zen's native behavior |
+| Close a Pinned or Essential tab (close button, middle-click, `Ctrl+W`, menus) | Block accidental closure |
+| Unpin / Remove from Essentials | Block by default; explicit per-tab context-menu commands authorize a deliberate action |
+| Drag a protected tab out of its category or window | Block unsafe moves and preserve the source tab |
+| Reorder within the same protected category | Allow native Zen reordering |
+| Duplicate across categories | Optional `protectedDragBehavior=duplicate` for tested single-tab transitions; otherwise block safely |
+| Unload a tab, restart Zen, quit the browser | Preserve normal behavior |
+| Ordinary tabs | Preserve native Zen behavior |
 
-## Current status
+The implementation covers multi-selection, folders, workspaces, containers, split views and cross-window cases by either preserving safe native behavior or blocking unsupported destructive transitions. Some physical drag gestures and UI variations still require manual verification; see [the real-Zen checklist](docs/manual-zen-checklist.md).
 
-**Close/unpin/removal protection, explicit per-tab unpin/removal, lifecycle-safe close/menu hiding, drag category protection (block by default, optional duplication), and a persistent personal loader are implemented and smoke-tested.**
+**Important:** Svalinn is currently a **privileged browser customization**, **not** a regular Firefox WebExtension, a CSS-only Zen Mod, or an official Zen feature. It installs a small autoconfig bootloader in the Zen installation directory plus a profile-local loader. Normal browsing requires **no Marionette or debugging port**. It is not yet distributed as a tagged installable release.
 
-- `src/policy.mjs`: dependency-free, testable protection rules.
-- `tests/`: policy matrix plus adapter, capability, close-guard, drop-guard,
-  intentional-action, CSS-scope, bundling, installer, and protocol tests. Run
-  with `npm test`.
-- `.github/workflows/ci.yml`: GitHub Actions runs `npm test` and `npm run check`
-  on Node 22 and 24 for `main` pushes and every pull request.
-- `docs/manual-zen-checklist.md`: disposable-profile manual gesture checklist.
-  Start a session with `npm run zen:manual`.
-- `src/zen/`: privileged adapter with close/demotion guards, default-block drag
-  protection, optional copy-on-drop, lifecycle-scoped close/menu UI, per-tab
-  intentional actions, a Marionette smoke harness, and a persistent personal
-  installer/loader.
-- `src/zen/persistent/` + `src/zen/install.mjs`: autoconfig bootloader and
-  profile-local loader. Normal browsing needs no Marionette or debug port.
-- `userChrome.css`: hides the close X/overlay for protected tabs only while the
-  adapter is successfully installed (`:root[svalinn-active]`). CSS is not the
-  security boundary.
-- `assets/icon.svg`: earlier provisional icon, not yet approved as final.
+## Try it on a disposable Zen copy
 
-## Personal installation
-
-Svalinn can be installed persistently for personal use in Zen. It uses a
-minimal autoconfig bootloader (the same class of mechanism as Sine/userChromeJS
-loaders, without depending on Sine) plus a trusted loader in the profile. It is
-not a published extension and does not use Marionette while browsing.
+Requires **Node.js 22+** and a supported local Zen installation. This path does **not** modify your real Zen installation or daily profile.
 
 ```bash
-# Test against a copied installation first; any supplied root is copied.
-npm run zen:installed-smoke
-node src/zen/installed-smoke.mjs --install-root /tmp/opencode/zen-copy
-
-# Install/update into the resolved leaf profile, not the ~/.zen container.
-node src/zen/install.mjs --profile /path/to/profile \
-  --install-root /opt/zen-browser-bin
-
-# Enable, disable, update, roll back or remove.
-node src/zen/install.mjs --profile /path/to/profile --install-root /opt/zen-browser-bin \
-  --disabled
-node src/zen/install.mjs --profile /path/to/profile --install-root /opt/zen-browser-bin \
-  --command rollback
-node src/zen/install.mjs --profile /path/to/profile --install-root /opt/zen-browser-bin \
-  --command uninstall
+git clone https://github.com/lelabdev/svalinn.git
+cd svalinn
+npm run check
+npm run zen:installed-smoke -- --headless
 ```
 
-The installer resolves an explicit `profiles.ini` container to its unique default
-leaf profile and rejects an ambiguous container instead of writing into it. It
-backs up `user.js`, `chrome/userChrome.css` and the affected installation-root
-files before writing; the shared bootloader is activated last and restored if any
-write fails. It requires `--confirm-daily` for profiles under `~/.zen`, refuses
-foreign autoconfig files or loaders unless `--force` is reviewed, refuses
-mismatched or malformed rollback backups, and fails closed on unverified Zen
-versions. Installation changes only `svalinn.cfg`,
-`defaults/pref/svalinn-autoconfig.js`, and a small `svalinn-registry.json` in the
-installation root; the two loader files are shared and remain while another
-registered profile still uses Svalinn. No `/opt` patch is performed during
-development or smoke tests. See
-[`docs/persistent-install.md`](docs/persistent-install.md) for the full model,
-multi-profile behavior, status prefs, backups, rollback, sudo ownership handling,
-and troubleshooting.
+The installed smoke suite copies Zen, installs Svalinn in a temporary profile, exercises the protected-tab behavior, checks no-Marionette startup and restart/session restore, and checks startup with Svalinn disabled.
 
-## Verification
+## Install for personal use
 
-The normal adapter smoke suite is unchanged:
+**Close Zen first.** For a typical Linux installation at `/opt/zen-browser-bin` and a profile stored under `~/.zen`, after testing the disposable installation:
 
 ```bash
-npm run zen:smoke
+# Back up the complete daily profile container yourself first.
+cp -a "$HOME/.zen" "$HOME/.zen.backup-before-svalinn"
+
+# Installation-root changes commonly need administrator permissions.
+sudo -E env "PATH=$PATH" node src/zen/install.mjs \
+  --profile "$HOME/.zen" \
+  --install-root /opt/zen-browser-bin \
+  --confirm-daily
 ```
 
-It launches an isolated profile with `userChrome.css`, verifies pre-install CSS is
-inert, normal/Pinned/Essential mapping, close/unpin/removal guards, mixed
-multi-close, the Zen close shortcut, unloading, CSS close-button visibility,
-folder-contained tabs, context-menu restrictions that preserve Zen's native
-state, intentional unpin/Remove-from-Essentials commands, uninstall restoring
-native affordances, default drag blocking, multi/folder/cross-window safety,
-two real workspaces, a non-default container, container-specific Essentials,
-group-label and split-view drops, folder-to-folder membership, multi-tab reorder,
-protected/normal out-of-window detached dragend paths, optional duplicate mode
-with non-default container identity, same-zone/normal-tab behavior, failure
-safety, restart, then deletes the profile. It never patches
-`/opt/zen-browser-bin` and never uses `~/.zen`.
+The installer resolves `~/.zen/profiles.ini` to the actual default **leaf profile**, rejecting ambiguous selections. It creates versioned backups and automatically restores previous files if installation fails. The explicit `--confirm-daily` flag protects daily profiles from accidental changes. **Never launch Zen itself with sudo.**
 
-The persistent-installed suite runs the same checks after installing the real
-bootloader/loader in a **copied** Zen installation. It first verifies startup
-without Marionette, then runs the full windowed/headless suite through the
-loaded adapter, including restart/session restore:
+Restart Zen normally. In `about:config`, `svalinn.status` should read `installed`.
+
+### Status, rollback and uninstall
+
+Run these from the Svalinn repository after **closing Zen** (change the installation root/profile if yours differ):
 
 ```bash
-npm run zen:installed-smoke                 # headless, temporary install copy
-npm run zen:installed-smoke -- --headed     # visible window
-# --install-root selects the SOURCE tree; it is always copied before mutation.
-npm run zen:installed-smoke -- --install-root /tmp/opencode/zen-copy
+# Inspect installation status.
+node src/zen/install.mjs --profile "$HOME/.zen" \
+  --install-root /opt/zen-browser-bin --command status --confirm-daily
+
+# Restore the latest Svalinn backup.
+sudo -E env "PATH=$PATH" node src/zen/install.mjs \
+  --profile "$HOME/.zen" --install-root /opt/zen-browser-bin \
+  --command rollback --confirm-daily
+
+# Remove Svalinn without deleting tabs or session data.
+sudo -E env "PATH=$PATH" node src/zen/install.mjs \
+  --profile "$HOME/.zen" --install-root /opt/zen-browser-bin \
+  --command uninstall --confirm-daily
 ```
 
-See [`docs/zen-integration.md`](docs/zen-integration.md) for the mechanism,
-manual smoke matrix, security model, and rollback steps.
+See [persistent installation, update, enable/disable, safety and troubleshooting](docs/persistent-install.md) for the complete instructions, permission model and multi-profile behavior. Installation modifies shared files in Zen's installation directory: carefully review conflicts with other privileged autoconfig loaders (including Sine). Unverified Zen versions are refused by default.
 
-## Testing and CI
+## Development and verification
 
 ```bash
-npm test                 # Node VM/policy adapter tests
-npm run check            # syntax checks + full test suite
-npm run zen:smoke        # disposable real-Zen smoke (windowed/headless by flag)
-npm run zen:installed-smoke # persistent loader in a copied install (no /opt writes)
-npm run zen:manual       # disposable profile for the manual checklist
+npm test                         # Node policy/adapter and installer tests
+npm run check                    # Syntax checks plus the full Node suite
+npm run zen:smoke -- --headless   # Disposable profile with injected adapter
+npm run zen:installed-smoke      # Real loader in a copied Zen installation
+npm run zen:manual               # Manual real-Zen verification environment
 ```
 
-GitHub Actions runs the Node test/syntax checks automatically on every pull
-request and on `main` pushes (Node 22 and 24). Browser smoke and the manual
-gesture matrix are not run in CI because they require a real Zen binary and
-display. `zen:manual` canonicalizes symlinked profile paths, refuses `~/.zen`
-before writing, and exits nonzero unless the adapter is installed with active
-guards. The expected manual outcomes and the remaining unautomated cases are
-documented in [`docs/manual-zen-checklist.md`](docs/manual-zen-checklist.md).
+GitHub Actions runs the Node checks on Node 22 and 24. Browser smoke tests require a local Zen executable and are not part of hosted CI. The policy, adapter, installer and safety regressions are covered in `tests/`; see [integration details](docs/zen-integration.md).
 
+## What comes next
 
-## Potential upstream contribution to Zen Browser
+The working protection and personal installation are complete. Remaining improvements are tracked separately:
 
-Svalinn is developed **specifically for Zen Browser** and is useful as a standalone
-personal customization. A longer-term possibility is to contribute the behavior
-**natively to Zen**, so users would not need a privileged mod. **This is only a
-proposal:** no upstream PR has been opened and the Zen maintainers have not
-accepted the feature.
+1. [#20 — Global Locked / Unlocked toggle](https://github.com/lelabdev/svalinn/issues/20): **not yet implemented**. A single checkbox in the Pinned/Essential tab context menu will let you temporarily restore native Zen operations for **all** protected tabs, then re-enable protection. It will be on by default and persist after user selection.
+2. [#21 — Native Zen contribution](https://github.com/lelabdev/svalinn/issues/21): after the toggle is tested, investigate a focused upstream PR against `zen-browser/desktop`. No upstream acceptance or integration is claimed.
+3. [#7 — Optional standalone release](https://github.com/lelabdev/svalinn/issues/7): decide whether a downloadable package is useful alongside a native contribution. [#8 — Logo](https://github.com/lelabdev/svalinn/issues/8) is deferred branding, not a release blocker.
 
-Proposed approach:
+A related community request is [Zen Browser discussion #7050 — Idea on Pinned Tabs Functionality](https://github.com/zen-browser/desktop/discussions/7050).
 
-1. Keep implementing and validating the behavior in
-   [lelabdev/svalinn](https://github.com/lelabdev/svalinn), starting with
-   copy-on-drop: dragging a Pinned or Essential outside its category creates a
-   copy in the destination while the original stays in place.
-2. Present the idea in [Zen Browser GitHub Discussions](https://github.com/zen-browser/desktop/discussions)
-   **before submitting a feature PR**, as recommended in Zen's README.
-   Suggest an **opt-in setting disabled by default** so existing users keep the
-   current drag-and-drop behavior.
-3. If maintainers are interested, fork
-   [zen-browser/desktop](https://github.com/zen-browser/desktop), develop from
-   the upstream `dev` branch, follow
-   [Zen's contribution guidelines](https://github.com/zen-browser/desktop/blob/dev/docs/contribute.md),
-   and open a focused, tested PR for native integration.
-4. Continue maintaining Svalinn as a separate prototype/personal tool unless
-   and until native support is accepted and shipped. An upstream PR is **not**
-   the same as an accepted or released feature.
+## License
 
-Related upstream discussion: [zen-browser/desktop#11278 —
-“Tabs and essentials easy to accidentally drag off”](https://github.com/zen-browser/desktop/issues/11278).
-The issue is **closed** after the original drag sensitivity problem was reported
-resolved. A “Lock Essentials” option was discussed there, but Svalinn's
-**copy-on-drop** design is a distinct proposed behavior.
-
-
-## Next tasks
-
-1. Verify the persistent loader against the next Zen release and update the
-   verified capability/version line, then re-run the installed smoke suite.
-2. Consider independent per-category protection and extend duplication to
-   additional drag contexts only after their category semantics are verified.
-3. Decide whether the personal loader should remain self-contained or integrate
-   with an external loader such as Sine after a separate review. Public release
-   is tracked separately (#7); this phase is personal use only.
-
-**Safety:** use the installer's backups and `--confirm-daily`; test with
-`zen:installed-smoke` and a copied installation before changing a daily profile.
-Never use `sudo` to run Zen itself.
+[MIT](LICENSE). You may use, modify and redistribute Svalinn under its terms. Zen Browser and other third-party projects retain their own licenses and trademarks; Svalinn is an independent community project.
