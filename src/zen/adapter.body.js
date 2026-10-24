@@ -10,19 +10,22 @@
 (() => {
   "use strict";
 
-  const ADAPTER_VERSION = "0.5.0";
+  const ADAPTER_VERSION = "0.6.0";
   const MARKER = "__svalinn";
   const DROP_HOOK = "__svalinnDropHook";
   const CLOSE_HOOK = "__svalinnCloseHook";
   const CONTEXT_HOOK = "__svalinnContextHook";
   const ACTIVE_ATTR = "svalinn-active";
+  const UNLOCKED_ATTR = "svalinn-unlocked";
   const MENU_BLOCK_ATTR = "svalinn-blocked";
   const ENABLED_PREF = "svalinn.enabled";
+  const LOCKED_PREF = "svalinn.locked";
   const DRAG_BEHAVIOR_PREF = "svalinn.protectedDragBehavior";
 
   const state = {
     installed: false,
     enabled: null,
+    locked: true,
     windows: new Set(),
     observer: null,
     capabilities: null,
@@ -60,6 +63,18 @@
     } catch {
       return false;
     }
+  }
+
+  function prefLocked() {
+    try {
+      return Services.prefs.getBoolPref(LOCKED_PREF, true) !== false;
+    } catch {
+      return true;
+    }
+  }
+
+  function persistLocked(value) {
+    Services.prefs.setBoolPref(LOCKED_PREF, Boolean(value));
   }
 
   function normalizeDragBehavior(value) {
@@ -283,6 +298,7 @@
    * - BLOCK: protected category change or unsupported path; keep source.
    */
   function planDrop(win, dnd, event) {
+    if (!state.locked) return { action: "native" };
     let source = null;
     let protectedTabs = [];
     let collected = null;
@@ -564,6 +580,7 @@
     if (
       !state.installed ||
       !state.enabled ||
+      !state.locked ||
       op.cancelled ||
       !op.win ||
       op.win.closed === true
@@ -702,7 +719,7 @@
     }
 
     const patched = function (event) {
-      if (!state.installed || !state.enabled) {
+      if (!state.installed || !state.enabled || !state.locked) {
         return original.call(this, event);
       }
 
@@ -729,7 +746,7 @@
     };
 
     const patchedReplaceTabsWithWindow = function (contextTab, options) {
-      if (!state.installed || !state.enabled) {
+      if (!state.installed || !state.enabled || !state.locked) {
         return originalReplaceTabsWithWindow.call(this, contextTab, options);
       }
       const collection = detachMembers(win, contextTab);
@@ -829,6 +846,7 @@
   }
 
   function canPerform(win, tab, action) {
+    if (!state.locked) return true;
     if (!guardActive(win) || !tab || tab.closing === true) return true;
     if (authorizedFor(tab, action)) return true;
     return (
@@ -853,6 +871,7 @@
     if (!state.installed || !state.enabled) {
       return { status: "disabled" };
     }
+    if (!state.locked) return { status: "unlocked" };
     const win = tab?.documentGlobal ?? browserWindows()[0];
     if (!win || !tab) return { status: "missing-tab" };
 
@@ -1037,6 +1056,23 @@
   ]);
   const UNPIN_ITEM_ID = "context_svalinn-unpin";
   const REMOVE_ITEM_ID = "context_svalinn-remove-essential";
+  const LOCK_ITEM_ID = "context_svalinn-protect";
+  const LOCK_SEPARATOR_ID = "context_svalinn-protect-separator";
+
+  function lockItemLabel() {
+    return state.locked
+      ? "Protect Pinned & Essentials"
+      : "Protect Pinned & Essentials (currently unlocked)";
+  }
+
+  function syncLockMenuItem(doc) {
+    const item = doc?.getElementById?.(LOCK_ITEM_ID);
+    if (!item) return;
+    item.checked = state.locked;
+    item.setAttribute("checked", String(state.locked));
+    item.setAttribute("aria-checked", String(state.locked));
+    item.setAttribute("label", lockItemLabel());
+  }
 
   function updateContextMenu(win) {
     const doc = win?.document;
@@ -1056,10 +1092,20 @@
       isProtected(readTabFlags(tab))
     );
 
+    const lockItem = doc.getElementById(LOCK_ITEM_ID);
+    const separator = doc.getElementById(LOCK_SEPARATOR_ID);
+    const showLock = protectedContext || protectedSelected;
+    if (lockItem) {
+      lockItem.hidden = !showLock;
+      syncLockMenuItem(doc);
+    }
+    if (separator) separator.hidden = !showLock;
+
     const unpinItem = doc.getElementById(UNPIN_ITEM_ID);
     const removeItem = doc.getElementById(REMOVE_ITEM_ID);
     if (unpinItem) {
       unpinItem.hidden = !(
+        state.locked &&
         !multiselected &&
         flags &&
         flags.pinned &&
@@ -1067,8 +1113,12 @@
       );
     }
     if (removeItem) {
-      removeItem.hidden = !(!multiselected && flags?.essential);
+      removeItem.hidden = !(state.locked && !multiselected && flags?.essential);
     }
+
+    // Unlocked means native Zen behavior: never hide native actions or show
+    // Svalinn's intentional-removal duplicates.
+    if (!state.locked) return;
 
     if (!protectedContext && !protectedSelected) return;
 
@@ -1140,6 +1190,30 @@
       REMOVE_ITEM_ID,
       "Remove This Tab from Essentials"
     );
+
+    let separator = doc.getElementById(LOCK_SEPARATOR_ID);
+    if (!separator) {
+      separator = doc.createXULElement
+        ? doc.createXULElement("menuseparator")
+        : doc.createElement("menuseparator");
+      separator.id = LOCK_SEPARATOR_ID;
+      separator.setAttribute("hidden", "true");
+      menu.appendChild(separator);
+    }
+    let lockItem = doc.getElementById(LOCK_ITEM_ID);
+    if (!lockItem) {
+      lockItem = doc.createXULElement
+        ? doc.createXULElement("menuitem")
+        : doc.createElement("menuitem");
+      lockItem.id = LOCK_ITEM_ID;
+      lockItem.setAttribute("type", "checkbox");
+      lockItem.setAttribute("label", lockItemLabel());
+      lockItem.setAttribute("checked", String(state.locked));
+      lockItem.setAttribute("hidden", "true");
+      lockItem.checked = state.locked;
+      menu.appendChild(lockItem);
+    }
+
     const onUnpin = () => {
       performIntentionalAction(win.TabContextMenu?.contextTab, "unpin");
       try {
@@ -1159,12 +1233,17 @@
         // Menu may already be closed.
       }
     };
+    const onToggleLock = () => {
+      setLocked(!state.locked);
+      updateContextMenu(win);
+    };
     const onShowing = event => {
       if (event?.target?.id === "tabContextMenu") updateContextMenu(win);
     };
 
     unpinItem.addEventListener("command", onUnpin);
     removeItem.addEventListener("command", onRemove);
+    lockItem.addEventListener("command", onToggleLock);
     menu.addEventListener("popupshowing", onShowing);
 
     Object.defineProperty(menu, CONTEXT_HOOK, {
@@ -1172,8 +1251,11 @@
         style,
         unpinItem,
         removeItem,
+        lockItem,
+        separator,
         onUnpin,
         onRemove,
+        onToggleLock,
         onShowing,
       },
       configurable: true,
@@ -1192,8 +1274,11 @@
       menu.removeEventListener("popupshowing", hook.onShowing);
       hook.unpinItem?.removeEventListener("command", hook.onUnpin);
       hook.removeItem?.removeEventListener("command", hook.onRemove);
+      hook.lockItem?.removeEventListener("command", hook.onToggleLock);
       hook.unpinItem?.remove();
       hook.removeItem?.remove();
+      hook.lockItem?.remove();
+      hook.separator?.remove();
       for (const id of MANAGED_MENU_ITEMS) {
         doc.getElementById(id)?.removeAttribute(MENU_BLOCK_ATTR);
       }
@@ -1213,6 +1298,122 @@
     } catch (error) {
       state.warnings.push(`active-marker: ${error}`);
     }
+  }
+
+  function setLockMarker(win) {
+    const element = win?.document?.documentElement;
+    if (
+      !element ||
+      typeof element.toggleAttribute !== "function" ||
+      typeof element.hasAttribute !== "function"
+    ) {
+      throw new Error("lock-marker-unavailable");
+    }
+    const expected = !state.locked;
+    element.toggleAttribute(UNLOCKED_ATTR, expected);
+    if (element.hasAttribute(UNLOCKED_ATTR) !== expected) {
+      throw new Error(
+        `lock-marker-mismatch: expected ${expected}, got ${element.hasAttribute(
+          UNLOCKED_ATTR
+        )}`
+      );
+    }
+    return true;
+  }
+
+  function syncWindowLock(win) {
+    setLockMarker(win);
+    updateContextMenu(win);
+  }
+
+  /**
+   * Change the single global protection state.
+   *
+   * The preference is written before any window changes. If a window cannot be
+   * synchronized, both the preference and every window are reverted so the UI
+   * never claims a state the guards do not enforce.
+   */
+  function setLocked(value) {
+    if (!state.installed || !state.enabled) {
+      return report("not-installed", {
+        locked: state.locked,
+        changedTabs: false,
+      });
+    }
+
+    const next = Boolean(value);
+    if (next === state.locked) {
+      try {
+        for (const win of browserWindows()) syncWindowLock(win);
+      } catch (error) {
+        state.warnings.push(`lock-sync: ${error}`);
+        return report("error", {
+          reason: "lock-sync",
+          locked: state.locked,
+          changedTabs: false,
+          error: String(error),
+        });
+      }
+      return report(next ? "locked" : "unlocked", {
+        locked: next,
+        changedTabs: false,
+      });
+    }
+
+    const previous = state.locked;
+    try {
+      persistLocked(next);
+    } catch (error) {
+      state.warnings.push(`lock-pref: ${error}`);
+      return report("error", {
+        reason: "lock-pref",
+        locked: previous,
+        changedTabs: false,
+        error: String(error),
+      });
+    }
+
+    if (!next) cancelAllPending("unlocked");
+    state.locked = next;
+
+    try {
+      for (const win of browserWindows()) syncWindowLock(win);
+    } catch (error) {
+      state.locked = previous;
+      try {
+        persistLocked(previous);
+      } catch (persistError) {
+        state.warnings.push(`lock-pref-revert: ${persistError}`);
+      }
+      const restorationErrors = [];
+      for (const win of browserWindows()) {
+        try {
+          syncWindowLock(win);
+        } catch (restoreError) {
+          restorationErrors.push(String(restoreError));
+          state.warnings.push(`lock-restore: ${restoreError}`);
+        }
+      }
+      state.warnings.push(`lock-sync: ${error}`);
+      return report("error", {
+        reason: "lock-sync",
+        locked: previous,
+        changedTabs: false,
+        error: String(error),
+        restorationErrors,
+      });
+    }
+
+    if (!next) cancelAllPending("unlocked");
+
+    return report(next ? "locked" : "unlocked", {
+      locked: next,
+      changedTabs: false,
+    });
+  }
+
+  function toggleLocked() {
+    return setLocked(!state.locked);
   }
 
   function attachWindow(win) {
@@ -1247,6 +1448,19 @@
         return false;
       }
     }
+    try {
+      syncWindowLock(win);
+    } catch (error) {
+      state.warnings.push(`lock-sync: ${error}`);
+      setActiveMarker(win, false);
+      removeContextMenuHook(win);
+      removeCloseHook(win);
+      removeDropHook(win);
+      try {
+        delete win[MARKER];
+      } catch {}
+      return false;
+    }
     state.windows.add(win);
     setActiveMarker(win, true);
     return true;
@@ -1254,6 +1468,11 @@
 
   function detachWindow(win) {
     setActiveMarker(win, false);
+    try {
+      win?.document?.documentElement?.removeAttribute?.(UNLOCKED_ATTR);
+    } catch (error) {
+      state.warnings.push(`lock-marker: ${error}`);
+    }
     removeContextMenuHook(win);
     removeCloseHook(win);
     removeDropHook(win);
@@ -1274,7 +1493,10 @@
           subject.addEventListener(
             "load",
             () => {
-              if (state.installed) attachWindow(subject);
+              if (!state.installed) return;
+              if (!attachWindow(subject)) {
+                state.warnings.push("window-attach-failed");
+              }
             },
             { once: true }
           );
@@ -1307,6 +1529,7 @@
       adapter: ADAPTER_VERSION,
       installed: state.installed,
       enabled: state.enabled,
+      locked: state.locked,
       dragBehavior: state.dragBehavior,
       windows: state.windows.size,
       pending: state.pending.size,
@@ -1325,6 +1548,7 @@
   async function install(options = {}) {
     const {
       enabled,
+      locked = null,
       waitForStartup = true,
       timeoutMs = 30_000,
       restoreTimeoutMs = 10_000,
@@ -1337,6 +1561,7 @@
     }
 
     state.enabled = enabled ?? prefEnabled();
+    state.locked = locked === null ? prefLocked() : Boolean(locked);
     state.capabilities = null;
     state.restoreTimeoutMs = restoreTimeoutMs;
     state.dragBehavior = normalizeDragBehavior(
@@ -1429,6 +1654,7 @@
       adapter: ADAPTER_VERSION,
       installed: state.installed,
       enabled: state.enabled,
+      locked: state.locked,
       dragBehavior: state.dragBehavior,
       windows,
       warnings: [...state.warnings],
@@ -1469,6 +1695,9 @@
     performIntentionalAction,
     setDragBehavior,
     dragBehavior: () => state.dragBehavior,
+    setLocked,
+    toggleLocked,
+    locked: () => state.locked,
     classify,
     policy: {
       ZONES,

@@ -9,15 +9,18 @@
 
 Svalinn is **already functional** as a persistent personal customization of [Zen Browser](https://zen-browser.app/), not just a proposed feature. The installer and browser integration have been exercised with **Zen 1.23.4b** in disposable profiles and copied installations.
 
-| Action | Current protected behavior |
+| Action | Current protected behavior (Locked default) |
 | --- | --- |
 | Close a Pinned or Essential tab (close button, middle-click, `Ctrl+W`, menus) | Block accidental closure |
 | Unpin / Remove from Essentials | Block by default; explicit per-tab context-menu commands authorize a deliberate action |
 | Drag a protected tab out of its category or window | Block unsafe moves and preserve the source tab |
 | Reorder within the same protected category | Allow native Zen reordering |
 | Duplicate across categories | Optional `protectedDragBehavior=duplicate` for tested single-tab transitions; otherwise block safely |
+| Global **Protect Pinned & Essentials** checkbox | Checked = Locked (default). Unchecked = Unlocked: native Zen close, unpin, removal, drag and detach behavior for all Pinned and Essential tabs |
 | Unload a tab, restart Zen, quit the browser | Preserve normal behavior |
 | Ordinary tabs | Preserve native Zen behavior |
+
+Right-click any Pinned or Essential tab and use the single global **Protect Pinned & Essentials** checkbox. Unchecking it temporarily suspends Svalinn's guards and restores native Zen behavior without moving, closing, unpinning or recreating any tab. Re-checking restores protection immediately in every window. The choice is persisted across normal restarts; a fresh profile starts Locked. This is one browser-wide toggle, not a per-tab mode, and `protectedDragBehavior` remains a separate low-level preference.
 
 The implementation covers multi-selection, folders, workspaces, containers, split views and cross-window cases by either preserving safe native behavior or blocking unsupported destructive transitions. Some physical drag gestures and UI variations still require manual verification; see [the real-Zen checklist](docs/manual-zen-checklist.md).
 
@@ -55,6 +58,8 @@ The installer resolves `~/.zen/profiles.ini` to the actual default **leaf profil
 
 Restart Zen normally. In `about:config`, `svalinn.status` should read `installed`.
 
+Right-click a Pinned or Essential tab to find the **Protect Pinned & Essentials** checkbox. It is checked (Locked) by default; uncheck it to restore native Zen close/unpin/removal/drag behavior for protected tabs, then check it again to re-enable the guards.
+
 ### Status, rollback and uninstall
 
 Run these from the Svalinn repository after **closing Zen** (change the installation root/profile if yours differ):
@@ -91,11 +96,10 @@ GitHub Actions runs the Node checks on Node 22 and 24. Browser smoke tests requi
 
 ## What comes next
 
-The working protection and personal installation are complete. Remaining improvements are tracked separately:
+The working protection, personal installation and global Locked / Unlocked toggle are complete. Remaining improvements are tracked separately:
 
-1. [#20 — Global Locked / Unlocked toggle](https://github.com/lelabdev/svalinn/issues/20): **not yet implemented**. A single checkbox in the Pinned/Essential tab context menu will let you temporarily restore native Zen operations for **all** protected tabs, then re-enable protection. It will be on by default and persist after user selection.
-2. [#21 — Native Zen contribution](https://github.com/lelabdev/svalinn/issues/21): after the toggle is tested, investigate a focused upstream PR against `zen-browser/desktop`. No upstream acceptance or integration is claimed.
-3. [#7 — Optional standalone release](https://github.com/lelabdev/svalinn/issues/7): decide whether a downloadable package is useful alongside a native contribution. [#8 — Logo](https://github.com/lelabdev/svalinn/issues/8) is deferred branding, not a release blocker.
+1. [#21 — Native Zen contribution](https://github.com/lelabdev/svalinn/issues/21): investigate a focused upstream PR against `zen-browser/desktop`. No upstream acceptance or integration is claimed.
+2. [#7 — Optional standalone release](https://github.com/lelabdev/svalinn/issues/7): decide whether a downloadable package is useful alongside a native contribution. [#8 — Logo](https://github.com/lelabdev/svalinn/issues/8) is deferred branding, not a release blocker.
 
 A related community request is [Zen Browser discussion #7050 — Idea on Pinned Tabs Functionality](https://github.com/zen-browser/desktop/discussions/7050).
 

@@ -27,6 +27,7 @@ function makeWindow({
   const win = {
     name,
     closed: false,
+    document: makeFakeDocument(),
     listeners,
     gBrowser: {
       tabs,
@@ -72,15 +73,24 @@ async function makeContext({
   version = "1.23.4b",
   appName = "Zen",
   enabledPref = false,
+  lockedPref = true,
 } = {}) {
   const observers = [];
+  const prefStore = {
+    "svalinn.enabled": enabledPref,
+    "svalinn.locked": lockedPref,
+  };
   const services = {
     appinfo: { name: appName, version },
     startup: { shuttingDown: false },
     wm: { getEnumerator: () => windows.slice() },
     prefs: {
       getBoolPref: (name, fallback) =>
-        name === "svalinn.enabled" ? enabledPref : fallback,
+        Object.hasOwn(prefStore, name) ? prefStore[name] : fallback,
+      setBoolPref: (name, value) => {
+        prefStore[name] = Boolean(value);
+      },
+      getStringPref: (_name, fallback) => fallback,
     },
     obs: {
       addObserver: (observer, topic) => observers.push({ observer, topic }),
@@ -94,7 +104,14 @@ async function makeContext({
     clearTimeout,
   });
   vm.runInContext(SCRIPT, context, { filename: "svalinn-inject.js" });
-  return { context, api: context.Svalinn, windows, observers, services };
+  return {
+    context,
+    api: context.Svalinn,
+    windows,
+    observers,
+    services,
+    prefStore,
+  };
 }
 
 test("classifies real tab shapes through the loaded policy", async () => {
@@ -308,6 +325,7 @@ function makeFakeDocument() {
     const node = {
       id,
       hidden,
+      checked: false,
       textContent: "",
       attrs: attributes,
       setAttribute(name, value) {
@@ -653,10 +671,24 @@ function makeDropEnvironment() {
 
 async function installDropEnvironment(options = {}) {
   const env = makeDropEnvironment();
-  const { api, services } = await makeContext({ windows: [env.win] });
+  const { api, services, prefStore } = await makeContext({ windows: [env.win] });
   const report = await api.install({ enabled: true, ...options });
   assert.equal(report.status, "installed");
-  return { ...env, api, services };
+  return { ...env, api, services, prefStore };
+}
+
+function showContextMenu(env, tab) {
+  env.win.TabContextMenu.contextTab = tab;
+  env.win.TabContextMenu.contextTabs = [tab];
+  env.win.TabContextMenu.multiselected = false;
+  env.document.menu.dispatchEvent({
+    type: "popupshowing",
+    target: env.document.menu,
+  });
+}
+
+function blockedAttr(doc, id) {
+  return doc.getElementById(id)?.getAttribute("svalinn-blocked") === "true";
 }
 
 test("active markers follow install, uninstall and failed install", async () => {
@@ -687,6 +719,385 @@ test("active markers follow install, uninstall and failed install", async () => 
   );
   assert.equal(failed.document.getElementById("svalinn-menu-style"), null);
   assert.equal(api.closeGuardedWindows(), 0);
+});
+
+test("a fresh install is locked and exposes one global checkbox", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const normal = env.addTab("https://normal.test");
+  const doc = env.document;
+  const lockItem = doc.getElementById("context_svalinn-protect");
+  const separator = doc.getElementById("context_svalinn-protect-separator");
+
+  assert.equal(env.api.locked(), true);
+  assert.equal(env.api.snapshot().locked, true);
+  assert.equal(doc.documentElement.hasAttribute("svalinn-active"), true);
+  assert.equal(doc.documentElement.hasAttribute("svalinn-unlocked"), false);
+  assert.ok(lockItem);
+  assert.equal(lockItem.getAttribute("type"), "checkbox");
+  assert.equal(lockItem.checked, true);
+  assert.equal(lockItem.getAttribute("checked"), "true");
+  assert.match(lockItem.getAttribute("label"), /Protect Pinned & Essentials/);
+
+  showContextMenu(env, pinned);
+  assert.equal(lockItem.hidden, false);
+  assert.equal(separator.hidden, false);
+
+  showContextMenu(env, normal);
+  assert.equal(lockItem.hidden, true);
+  assert.equal(separator.hidden, true);
+});
+
+test("unlocking suspends every guard and relocking restores them", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const essential = env.addTab("https://essential.test", {
+    pinned: true,
+    essential: true,
+  });
+  const doc = env.document;
+  const lockItem = doc.getElementById("context_svalinn-protect");
+  const unpinItem = doc.getElementById("context_svalinn-unpin");
+  const removeItem = doc.getElementById("context_svalinn-remove-essential");
+
+  showContextMenu(env, pinned);
+  assert.equal(blockedAttr(doc, "context_closeTab"), true);
+  assert.equal(unpinItem.hidden, false);
+
+  lockItem.dispatchEvent({ type: "command" });
+  assert.equal(env.api.locked(), false);
+  assert.equal(env.api.snapshot().locked, false);
+  assert.equal(env.services.prefs.getBoolPref("svalinn.locked", true), false);
+  assert.equal(doc.documentElement.hasAttribute("svalinn-unlocked"), true);
+
+  showContextMenu(env, pinned);
+  assert.equal(lockItem.checked, false);
+  assert.equal(lockItem.getAttribute("checked"), "false");
+  assert.match(lockItem.getAttribute("label"), /currently unlocked/i);
+  assert.equal(unpinItem.hidden, true);
+  assert.equal(removeItem.hidden, true);
+  assert.equal(blockedAttr(doc, "context_closeTab"), false);
+  assert.equal(blockedAttr(doc, "context_unpinTab"), false);
+
+  // Native close and unpin now reach Zen.
+  env.win.gBrowser.removeTab(pinned);
+  assert.equal(env.tabs.includes(pinned), false);
+  env.win.gBrowser.unpinTab(essential);
+  assert.equal(essential.pinned, false);
+
+  const multiPinned = env.addTab("https://multi-pinned.test", {
+    pinned: true,
+  });
+  const multiNormal = env.addTab("https://multi-normal.test");
+  env.win.gBrowser.removeTabs([multiPinned, multiNormal]);
+  assert.equal(env.tabs.includes(multiPinned), false);
+  assert.equal(env.tabs.includes(multiNormal), false);
+
+  const relockTab = env.addTab("https://relock.test", { pinned: true });
+  showContextMenu(env, relockTab);
+  lockItem.dispatchEvent({ type: "command" });
+  assert.equal(env.api.locked(), true);
+  assert.equal(env.services.prefs.getBoolPref("svalinn.locked", true), true);
+  assert.equal(doc.documentElement.hasAttribute("svalinn-unlocked"), false);
+
+  const before = env.stats.removeTabCalls;
+  env.win.gBrowser.removeTab(relockTab);
+  assert.ok(env.tabs.includes(relockTab));
+  assert.equal(env.stats.removeTabCalls, before);
+  assert.equal(blockedAttr(doc, "context_closeTab"), true);
+});
+
+test("unlocking cancels pending duplication without touching the source", async () => {
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  pinned._dragData = { movingTabs: [pinned] };
+  env.stats.lazyDuplicate = "with-id";
+
+  env.drop({ source: pinned }, "normal");
+  assert.equal(env.api.pendingDuplications(), 1);
+
+  assert.equal(env.api.setLocked(false).status, "unlocked");
+  assert.equal(env.api.pendingDuplications(), 0);
+  assert.ok(env.tabs.includes(pinned));
+  assert.equal(pinned.pinned, true);
+});
+
+test("unlocking delegates drops and detach to native Zen", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+
+  assert.equal(env.api.setLocked(false).status, "unlocked");
+  const nativeBefore = env.stats.nativeDrops;
+  env.drop({ source: pinned }, "normal");
+  assert.equal(env.stats.nativeDrops, nativeBefore + 1);
+
+  const detachBefore = env.stats.detachCalls;
+  env.win.gBrowser.replaceTabsWithWindow(pinned);
+  assert.equal(env.stats.detachCalls, detachBefore + 1);
+
+  assert.equal(env.api.setLocked(true).status, "locked");
+  env.drop({ source: pinned }, "normal");
+  assert.equal(env.stats.nativeDrops, nativeBefore + 1);
+});
+
+test("lock state synchronizes across windows and new windows", async () => {
+  const first = makeDropEnvironment();
+  const second = makeDropEnvironment();
+  const windows = [first.win, second.win];
+  const { api, observers } = await makeContext({ windows });
+  await api.install({ enabled: true });
+
+  const pinnedFirst = first.addTab("https://first.test", { pinned: true });
+  const pinnedSecond = second.addTab("https://second.test", { pinned: true });
+  showContextMenu({ ...second, api }, pinnedSecond);
+  const lockSecond = second.document.getElementById("context_svalinn-protect");
+  assert.equal(lockSecond.checked, true);
+
+  assert.equal(api.setLocked(false).status, "unlocked");
+  assert.equal(
+    first.document.documentElement.hasAttribute("svalinn-unlocked"),
+    true
+  );
+  assert.equal(
+    second.document.documentElement.hasAttribute("svalinn-unlocked"),
+    true
+  );
+  showContextMenu({ ...second, api }, pinnedSecond);
+  assert.equal(lockSecond.checked, false);
+
+  const third = makeDropEnvironment();
+  windows.push(third.win);
+  observers[0].observer.observe(third.win, "domwindowopened");
+  third.win.dispatchEvent({ type: "load" });
+  assert.equal(third.win.__svalinn, api);
+  assert.equal(
+    third.document.documentElement.hasAttribute("svalinn-unlocked"),
+    true
+  );
+
+  assert.equal(api.setLocked(true).status, "locked");
+  for (const env of [first, second, third]) {
+    assert.equal(
+      env.document.documentElement.hasAttribute("svalinn-unlocked"),
+      false
+    );
+  }
+  showContextMenu({ ...first, api }, pinnedFirst);
+  assert.equal(
+    first.document.getElementById("context_svalinn-protect").checked,
+    true
+  );
+});
+
+test("failed lock changes do not claim a new state", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const lockItem = env.document.getElementById("context_svalinn-protect");
+  const original = env.services.prefs.setBoolPref;
+  env.services.prefs.setBoolPref = () => {
+    throw new Error("pref write denied");
+  };
+
+  const failed = env.api.setLocked(false);
+  assert.equal(failed.status, "error");
+  assert.equal(failed.reason, "lock-pref");
+  assert.equal(env.api.locked(), true);
+  assert.equal(
+    env.document.documentElement.hasAttribute("svalinn-unlocked"),
+    false
+  );
+  showContextMenu(env, pinned);
+  assert.equal(lockItem.checked, true);
+
+  env.services.prefs.setBoolPref = original;
+  for (let index = 0; index < 5; index += 1) {
+    env.api.toggleLocked();
+  }
+  assert.equal(env.api.locked(), false);
+  assert.equal(env.services.prefs.getBoolPref("svalinn.locked", true), false);
+});
+
+test("a marker failure rolls back unlock and is not reported as success", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const docElement = env.document.documentElement;
+  const originalToggle = docElement.toggleAttribute;
+  docElement.toggleAttribute = () => {
+    throw new Error("marker denied");
+  };
+
+  const failed = env.api.setLocked(false);
+  assert.equal(failed.status, "error");
+  assert.equal(failed.reason, "lock-sync");
+  assert.equal(failed.locked, true);
+  assert.equal(env.api.locked(), true);
+  assert.equal(env.prefStore["svalinn.locked"], true);
+  assert.equal(docElement.hasAttribute("svalinn-unlocked"), false);
+  assert.ok(failed.restorationErrors.length > 0);
+
+  showContextMenu(env, pinned);
+  assert.equal(
+    env.document.getElementById("context_svalinn-protect").checked,
+    true
+  );
+
+  docElement.toggleAttribute = originalToggle;
+  assert.equal(env.api.setLocked(false).status, "unlocked");
+  assert.equal(docElement.hasAttribute("svalinn-unlocked"), true);
+});
+
+test("a later-window marker failure rolls back every window", async () => {
+  const first = makeDropEnvironment();
+  const second = makeDropEnvironment();
+  const windows = [first.win, second.win];
+  const { api, prefStore } = await makeContext({ windows });
+  await api.install({ enabled: true });
+
+  const firstPinned = first.addTab("https://first.test", { pinned: true });
+  const secondPinned = second.addTab("https://second.test", { pinned: true });
+  showContextMenu({ ...first, api }, firstPinned);
+  showContextMenu({ ...second, api }, secondPinned);
+
+  const secondToggle = second.document.documentElement.toggleAttribute;
+  second.document.documentElement.toggleAttribute = () => {
+    throw new Error("second marker denied");
+  };
+
+  const failed = api.setLocked(false);
+  assert.equal(failed.status, "error");
+  assert.equal(api.locked(), true);
+  assert.equal(prefStore["svalinn.locked"], true);
+  for (const env of [first, second]) {
+    assert.equal(
+      env.document.documentElement.hasAttribute("svalinn-unlocked"),
+      false
+    );
+    assert.equal(
+      env.document.getElementById("context_svalinn-protect").checked,
+      true
+    );
+  }
+
+  second.document.documentElement.toggleAttribute = secondToggle;
+  assert.equal(api.setLocked(false).status, "unlocked");
+
+  second.document.documentElement.toggleAttribute = () => {
+    throw new Error("second marker denied on relock");
+  };
+  const relockFailed = api.setLocked(true);
+  assert.equal(relockFailed.status, "error");
+  assert.equal(api.locked(), false);
+  assert.equal(prefStore["svalinn.locked"], false);
+  for (const env of [first, second]) {
+    assert.equal(
+      env.document.documentElement.hasAttribute("svalinn-unlocked"),
+      true
+    );
+  }
+
+  second.document.documentElement.toggleAttribute = secondToggle;
+  assert.equal(api.setLocked(true).status, "locked");
+});
+
+test("a window whose lock marker cannot be applied is not attached", async () => {
+  const env = makeDropEnvironment();
+  env.document.documentElement.toggleAttribute = () => {
+    throw new Error("marker denied");
+  };
+  const { api } = await makeContext({ windows: [env.win] });
+
+  const report = await api.install({ enabled: true });
+  assert.equal(report.status, "unsupported");
+  assert.equal(report.reason, "window-hook-install-failed");
+  assert.equal(env.win.__svalinn, undefined);
+  assert.equal(api.snapshot().installed, false);
+  assert.equal(api.snapshot().windows[0].hooked, false);
+  assert.equal(
+    env.document.documentElement.hasAttribute("svalinn-active"),
+    false
+  );
+});
+
+test("a new window with a failing lock marker is not attached", async () => {
+  const first = makeDropEnvironment();
+  const windows = [first.win];
+  const { api, observers } = await makeContext({ windows });
+  await api.install({ enabled: true });
+
+  const second = makeDropEnvironment();
+  second.document.documentElement.toggleAttribute = () => {
+    throw new Error("marker denied");
+  };
+  windows.push(second.win);
+  observers[0].observer.observe(second.win, "domwindowopened");
+  second.win.dispatchEvent({ type: "load" });
+
+  assert.equal(second.win.__svalinn, undefined);
+  assert.equal(
+    api.snapshot().windows.filter(window => window.hooked).length,
+    1
+  );
+  assert.match(
+    api.snapshot().warnings.join("\n"),
+    /lock-sync|window-attach-failed/
+  );
+});
+
+test("the chosen lock state persists and defaults to locked", async () => {
+  const unlocked = await makeContext({ lockedPref: false });
+  const unlockedWindow = makeDropEnvironment();
+  const context = await makeContext({
+    windows: [unlockedWindow.win],
+    lockedPref: false,
+  });
+  await context.api.install({ enabled: true });
+  assert.equal(context.api.locked(), false);
+  assert.equal(
+    unlockedWindow.document.documentElement.hasAttribute("svalinn-unlocked"),
+    true
+  );
+  context.api.uninstall();
+  await context.api.install({ enabled: true });
+  assert.equal(context.api.locked(), false);
+
+  const fresh = await makeContext({
+    windows: [makeDropEnvironment().win],
+  });
+  await fresh.api.install({ enabled: true });
+  assert.equal(fresh.api.locked(), true);
+
+  assert.equal(unlocked.api.setLocked(false).status, "not-installed");
+});
+
+test("uninstall removes the lock control and marker", async () => {
+  const env = await installDropEnvironment();
+  assert.ok(env.document.getElementById("context_svalinn-protect"));
+  assert.ok(env.document.getElementById("context_svalinn-protect-separator"));
+
+  env.api.setLocked(false);
+  env.api.uninstall();
+  assert.equal(env.document.getElementById("context_svalinn-protect"), null);
+  assert.equal(
+    env.document.getElementById("context_svalinn-protect-separator"),
+    null
+  );
+  assert.equal(
+    env.document.documentElement.hasAttribute("svalinn-unlocked"),
+    false
+  );
+
+  await env.api.install({ enabled: true });
+  const reinstalledLock = env.document.getElementById("context_svalinn-protect");
+  assert.ok(reinstalledLock);
+  const reinstalledPinned = env.addTab("https://reinstalled.test", {
+    pinned: true,
+  });
+  showContextMenu(env, reinstalledPinned);
+  const before = env.api.locked();
+  reinstalledLock.dispatchEvent({ type: "command" });
+  assert.equal(env.api.locked(), !before);
+  reinstalledLock.dispatchEvent({ type: "command" });
+  assert.equal(env.api.locked(), before);
 });
 
 test("intentional menu actions are per-tab and per-action", async () => {

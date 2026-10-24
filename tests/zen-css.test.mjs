@@ -22,9 +22,23 @@ test("close-hiding rules cover Pinned, Essential and overlay controls", () => {
   assert.match(css, /\.tab-icon-overlay\[closebutton\]/);
 });
 
-test("CSS has no persistent unlocked bypass", () => {
-  assert.doesNotMatch(css, /svalinn-unlocked/);
+test("unlocked windows relax close-hiding only through the global marker", () => {
+  assert.match(css, /:root\[svalinn-active\]:not\(\[svalinn-unlocked\]\)/);
   assert.doesNotMatch(css, /display:\s*flex\s*!important/);
+
+  const closeRules = css
+    .split("}")
+    .map(block => block.trim())
+    .filter(
+      block =>
+        block.includes("tab-close-button") || block.includes("close-icon")
+    );
+  for (const rule of closeRules) {
+    assert.match(
+      rule,
+      /:root\[svalinn-active\]:not\(\[svalinn-unlocked\]\)/
+    );
+  }
 });
 
 test("normal tabs are not matched by a bare close-button rule", () => {
