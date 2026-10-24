@@ -17,15 +17,15 @@
 
 ## Current status
 
-**Close/unpin/removal protection, cross-zone duplication, lifecycle-safe close-affordance/menu hiding, and explicit per-tab unpin/Remove-from-Essentials actions implemented and smoke-tested.**
+**Close/unpin/removal protection, explicit per-tab unpin/removal, lifecycle-safe close/menu hiding, and drag category protection (block by default, optional duplication) implemented and smoke-tested.**
 
 - `src/policy.mjs`: dependency-free, testable protection rules.
 - `tests/`: policy regression tests plus adapter, capability, close-guard,
   drop-guard, intentional-action, CSS-scope, bundling, and protocol tests. Run
   with `npm test`.
-- `src/zen/`: privileged adapter with close/demotion and cross-zone drop guards,
-  lifecycle-scoped close-affordance CSS, per-tab intentional actions, and a
-  Marionette smoke harness.
+- `src/zen/`: privileged adapter with close/demotion guards, default-block drag
+  protection, optional copy-on-drop, lifecycle-scoped close/menu UI, per-tab
+  intentional actions, and a Marionette smoke harness.
 - `userChrome.css`: hides the close X/overlay for protected tabs only while the
   adapter is successfully installed (`:root[svalinn-active]`). CSS is not the
   security boundary.
@@ -46,14 +46,18 @@ Zen Mods are CSS-only. A true guard requires a privileged integration with brows
 - Right-click a protected tab for **Unpin This Pinned Tab** or **Remove This Tab
   from Essentials**. Each runs the native action for that single tab only, under
   a per-action authorization that ends with the call; no timer or global unlock.
-- Cross-zone drag and drop duplicates for a single tab in one window:
+- Protected category is preserved on drag. Default behavior blocks
+  category-changing/cross-window/multi-tab/unsafe drops and out-of-window
+  detachment; same-category reordering and safe folder moves stay native.
+  Normal-tab detachment remains native. Copy-on-drop is optional
+  (`svalinn.protectedDragBehavior = duplicate`):
 
-| Source | Target | Result |
-| --- | --- | --- |
-| Essential | Normal / Pinned | Duplicate into target; keep Essential |
-| Pinned | Normal / Essential | Duplicate into target; keep Pinned |
-| Protected | Same category | Native reorder |
-| Normal | Any category | Native behavior |
+| Drag | Result |
+| --- | --- |
+| Reorder within Essentials/Pinned, or safe same-category folder move | Native |
+| Protected cross-category, cross-window, multi-tab, group/split, or unknown target | Block; source category preserved |
+| Optional duplicate mode, single tab/same window | Duplicate; source preserved; failures block |
+| Normal tabs | Native behavior |
 
 The smoke harness validates these paths in a disposable profile:
 
@@ -66,10 +70,13 @@ inert, normal/Pinned/Essential mapping, close/unpin/removal guards, mixed
 multi-close, the Zen close shortcut, unloading, CSS close-button visibility,
 folder-contained tabs, context-menu restrictions that preserve Zen's native
 state, intentional unpin/Remove-from-Essentials commands, uninstall restoring
-native affordances, all four duplication transitions, same-zone and normal-tab
-behavior, failure safety, uninstall during a pending restore, restart/session
-restore, then deletes the profile. It never patches `/opt/zen-browser-bin` and
-never uses `~/.zen`. See
+native affordances, default drag blocking, multi/folder/cross-window safety,
+two real workspaces, a non-default container, container-specific Essentials,
+group-label and split-view drops, folder-to-folder membership, multi-tab reorder,
+protected/normal out-of-window detached dragend paths, optional duplicate mode
+with non-default container identity, same-zone/normal-tab behavior, failure
+safety, restart, then deletes the profile. It never patches
+`/opt/zen-browser-bin` and never uses `~/.zen`. See
 [`docs/zen-integration.md`](docs/zen-integration.md) for the mechanism, manual
 smoke matrix, security model, and rollback steps.
 
@@ -111,6 +118,6 @@ resolved. A “Lock Essentials” option was discussed there, but Svalinn's
 ## Next tasks
 
 1. Choose and document a maintainable deployment path for the adapter (the smoke harness is not a user installation), then test in a disposable Zen profile and verify Zen update compatibility before enabling in the main profile.
-2. Extend pre-move duplication to multi-selected, cross-window, folder, tab-group and split-view cases.
+2. Consider independent per-category protection and extend duplication to additional drag contexts only after their category semantics are verified.
 
 **Safety:** do not patch `/opt/zen-browser-bin` or enable experimental scripts in the daily profile during development.

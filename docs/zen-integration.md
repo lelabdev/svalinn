@@ -3,15 +3,14 @@
 Svalinn protects Pinned and Essential tabs inside Zen Browser. This document
 covers the privileged integration: how a script reaches Zen's browser chrome,
 how a disposable profile is used, how close/unpin removal is blocked, and how
-cross-zone drag and drop is duplicated without touching a daily profile or the
-Zen installation.
+drag/drop preserves protected category membership (with optional duplication)
+without touching a daily profile or the Zen installation.
 
-> Status: **close/unpin/remove protection, cross-zone duplication,
-> lifecycle-safe close-affordance/menu hiding, and explicit per-tab unpin /
-> Remove-from-Essentials actions are implemented and smoke-tested.** Normal tabs,
-> unloading, browsing, browser quit, and session restore stay native.
-> Multi-selection, cross-window moves, folders, and split views remain out of scope
-> for drag and drop.
+> Status: **close/unpin/remove protection, explicit per-tab unpin/removal,
+> lifecycle-safe close/menu hiding, and drag category protection are implemented
+> and smoke-tested.** Protected cross-category drags are blocked by default;
+> duplication is an opt-in mode. Normal tabs, safe same-category reordering/folder
+> moves, unloading, browsing, browser quit, and session restore stay native.
 
 ## Verified environment
 
@@ -86,28 +85,31 @@ What happens:
 6. One normal, one Pinned, and one Essential tab are created through Zen's own
    APIs.
 7. The adapter maps the tabs back to `normal` / `pinned` / `essential`.
-8. Synthetic drops verify all four cross-zone transitions create exactly one
-   copy, keep the source protected, and select the copy.
-9. Same-zone reordering and normal-tab drops are checked to stay native.
-10. Duplication failure and a protected `about:config` tab are checked to leave
-    the source intact.
-11. Close, close-current, mixed multi-close, unpin, Remove from Essentials, and
+8. Default `block` mode verifies all four protected cross-zone transitions keep
+   the source category with no copy; multi-selection, folder same-category, and
+   cross-window paths are checked.
+9. Same-zone reordering and normal-tab drops stay native.
+10. `duplicate` mode verifies the four safe single-tab transitions create one
+    copy, keep the source protected, and preserve container identity.
+11. Duplication failure and a protected `about:config` tab leave the source
+    intact.
+12. Close, close-current, mixed multi-close, unpin, Remove from Essentials, and
     Zen's close shortcut are checked against protected and normal tabs.
-12. Unloading a protected tab is checked to remain available.
-13. Close-button CSS, folder-contained tabs, and context-menu restrictions are
+13. Unloading a protected tab is checked to remain available.
+14. Close-button CSS, folder-contained tabs, and context-menu restrictions are
     checked; Zen's native hidden/disabled menu state must remain unchanged.
-14. Intentional Unpin and Remove-from-Essentials commands are executed for
+15. Intentional Unpin and Remove-from-Essentials commands are executed for
     Pinned, Essential, and folder tabs; other protected tabs, close, and drag
     authorization remain blocked afterward.
-15. Install, re-install, uninstall, and disabled mode are checked against a tab
+16. Install, re-install, uninstall, and disabled mode are checked against a tab
     fingerprint to prove tabs were not changed.
-16. Uninstall removes the active marker, menu style and guards so native close
+17. Uninstall removes the active marker, menu style and guards so native close
     affordances return.
-17. A second window is opened to verify the `domwindowopened` observer, close
+18. A second window is opened to verify the `domwindowopened` observer, close
     guard, menu style, and drop hook attach without touching tabs.
-18. Zen restarts on the same profile and the original tabs must restore with
+19. Zen restarts on the same profile and the original tabs must restore with
     their zones intact, with both guards reattached.
-19. Zen shuts down, and the temporary profile is removed.
+20. Zen shuts down, and the temporary profile is removed.
 
 Useful flags:
 
@@ -264,48 +266,90 @@ folder-contained tabs, locked context-menu restrictions without mutating native
 menu state, uninstall restoring native affordances, multi-window attachment,
 restart/session restore, and shutdown.
 
-## Cross-zone duplication
+## Drag category protection and optional duplication
 
-Issue #2 makes a protected tab a permanent shortcut. Dragging a Pinned or
-Essential tab into another category creates one copy in the destination and
-leaves the source in place.
+Issue #5 protects **category membership and existence**, not tab position.
+With the default `block` mode:
 
-| Source | Target | Result |
-| --- | --- | --- |
-| Essential | Normal | Duplicate as Normal; source stays Essential |
-| Essential | Pinned | Duplicate as Pinned; source stays Essential |
-| Pinned | Normal | Duplicate as Normal; source stays Pinned |
-| Pinned | Essential | Duplicate as Essential; source stays Pinned |
-| Essential / Pinned | Same category | Native reorder |
-| Normal | Any category | Native behavior |
+| Drag | Result |
+| --- | --- |
+| Reorder within Essentials or within Pinned | Native allow |
+| Move between folders that stays in the same protected category | Native allow |
+| Essential → Normal/Pinned, or Pinned → Normal/Essential | Block; source keeps category |
+| Cross-window move of a protected tab | Block |
+| Multi-selection containing a protected tab that would cross categories | Block whole drop; source tabs stay put |
+| Workspace/container/group/split-view interaction with unclear category effect | Block when a protected tab is involved |
+| Duplicate via Zen's native context menu | Allow; original unchanged |
+| Normal tabs | Native Zen behavior |
 
-How it works:
+The invariant is: while protected and locked, a drop can never silently close,
+detach, unpin, remove Essential status, or turn the original into Normal. Safe
+same-category organization is still allowed.
 
-1. On install, Svalinn replaces `gBrowser.tabContainer.tabDragAndDrop.handle_drop`
-   for each browser window with a guarded wrapper.
-2. A wrapper is only engaged for a same-window, single-tab `move` drop where the
-   source is protected and the target section is a different zone.
-3. The native drop handler is skipped, so Zen never calls `removeEssentials` or
-   `gBrowser.unpinTab` on the protected source.
-4. The tab is duplicated, then its zone is applied **after** the
-   `SSTabRestored` event. This is important: duplicated tabs are restored
-   asynchronously and can overwrite an early category change. A nonempty tab id
-   is deliberately not treated as proof of restoration.
-5. Pending duplication operations are tracked per window. `uninstall()`,
-   `setEnabled(false)`, and window detach cancel the restore listener/timer and
-   remove any not-yet-finalized copy without touching the source.
-6. The copy is positioned and selected. If duplication, category application, or
-   restore fails or times out, the copy is removed and the source is left
-   untouched.
-7. If a protected same-window single-tab drop has an unknown target or a
-   planning error, the drop is consumed and the source is preserved. Zen's
-   native demotion handler is not called.
-8. Same-zone reordering, normal tabs, multi-selected tabs, and cross-window drags
-   fall through to Zen's native handler.
+### Out-of-window detachment
 
-The guard is restored on `Svalinn.uninstall()` or when the browser exits.
-Multi-selection, cross-window moves, folders, split views, and group labels are
-intentionally left native for follow-up work.
+Releasing a tab outside the window does not go through `handle_drop`; Firefox and
+Zen reach `gBrowser.replaceTabsWithWindow` from `handle_dragend`. Svalinn wraps
+that entry point per window and reuses the same protected-member resolver:
+
+- protected Pinned/Essential tabs, group/folder labels containing protected
+  members, split views, and mixed selections are blocked from detaching;
+- native `handle_dragend` still executes for animation/visibility/drag-state
+  cleanup;
+- normal tabs are delegated to the original `replaceTabsWithWindow` and keep
+  native new-window detachment;
+- uninstall restores the original method.
+
+A real-input xdotool run on Zen 1.23.4b verified dragging Pinned and Essential
+tabs outside the window: no new window, source tab/window/category unchanged,
+and `detach-blocked:protected-tab` recorded. Dragging a Normal tab out created a
+new window and cleaned up normally.
+
+### Optional duplicate mode
+
+The merged copy-on-drop path from #2 is retained as an opt-in mode:
+
+```text
+svalinn.protectedDragBehavior = block   # default
+svalinn.protectedDragBehavior = duplicate
+```
+
+It can also be set per install (`Svalinn.install({ dragBehavior: "duplicate" })`)
+or for the current session with `Svalinn.setDragBehavior("duplicate")`.
+`Svalinn.dragBehavior()` returns the active mode.
+
+In `duplicate` mode, the four single-tab, same-window cross-category transitions
+copy into the destination and keep the original. Duplication is only attempted
+for that proven-safe shape; multi-selection, cross-window, workspace, group, and
+split-view cases still fail closed. If duplication fails, the copy is removed and
+the source is preserved.
+
+How the guard works:
+
+1. Svalinn wraps `gBrowser.tabContainer.tabDragAndDrop.handle_drop` in every
+   browser window.
+2. It canonicalizes the entire moving set: the primary source, every
+   `movingTabs` entry, native tab-group labels, Zen folders, and split-view
+   members. Unreadable/cyclic/unknown membership fails closed.
+3. It resolves the target category, active/source/target workspace, container
+   context, and split-view involvement before Zen mutates anything.
+4. A protected drag is allowed natively only when it is a proven same-window,
+   same-workspace, same-category, compatible-container, non-split organization
+   change (reorder or safe folder move).
+5. Non-protected drags fall through to native behavior.
+6. Protected cross-category, cross-window, cross-workspace, container-incompatible
+   Essentials, multi-tab/group, split-view, and unknown-target drops are consumed:
+   native demotion/adoption is not called and the source remains in its original
+   category/workspace/container.
+7. Out-of-window detach is guarded separately: the per-window
+   `gBrowser.replaceTabsWithWindow` entry point is wrapped so a protected tab,
+   group label, split view, or mixed selection returns without migration. Zen's
+   native `handle_dragend` still runs for cleanup/visuals; normal-tab detach
+   delegates unchanged.
+8. In duplicate mode, only a single protected tab crossing a category is copied.
+   The destination zone is applied after `SSTabRestored`; a nonempty tab id is not
+   proof of restoration. Pending copies are cancelled on uninstall/window detach,
+   and failures remove the copy while keeping the source.
 
 ## Install and uninstall model
 
@@ -324,9 +368,9 @@ There is intentionally no persistent installation for this phase.
 
 The adapter is disabled by default (`svalinn.enabled` defaults to `false`) and
 the smoke test passes `enabled: true` explicitly. A disabled call returns
-`{ status: "disabled" }` and attaches nothing. The intentional-removal UX is
-deferred, so uninstall/disable remains only a development lifecycle control, not
-a documented user workflow.
+`{ status: "disabled" }` and attaches nothing. Uninstall/disable restores native
+behavior and is a development lifecycle control, not the intentional-removal UX;
+the per-tab context commands cover that.
 
 ### In-browser API
 
@@ -336,14 +380,17 @@ Svalinn.probe({ allowUnverifiedVersion: false });
 
 await Svalinn.install({ enabled: true, waitForStartup: true, timeoutMs: 30000 });
 // { status: "installed" | "unsupported" | "disabled" | "not-ready" | "already-installed", ... }
+// optional: dragBehavior: "block" | "duplicate"
 
 Svalinn.snapshot();
-// { adapter, installed, enabled, warnings, pending,
+// { adapter, installed, enabled, dragBehavior, warnings, pending,
 //   windows: [{ ready, hasManager, hooked, closeHooked, tabCount, tabs }] }
 
 Svalinn.hookedWindows(); // number of windows with the drop guard installed
 Svalinn.closeGuardedWindows(); // number of windows with close/demotion guards
 Svalinn.pendingDuplications(); // restore operations waiting for SSTabRestored
+Svalinn.setDragBehavior("block" | "duplicate"); // session-scoped
+Svalinn.dragBehavior(); // active drag mode
 Svalinn.uninstall(); // { status: "uninstalled", changedTabs: false }
 Svalinn.classify(tab); // { zone: "essential" | "pinned" | "normal", ... }
 ```
@@ -405,11 +452,16 @@ npm run zen:smoke
   shutdown/startup/window-close bypasses, active-marker lifecycle on
   install/uninstall/failed install, native context-menu hidden-state preservation,
   opt-in/disabled mode, idempotent install, clean uninstall, startup timeouts,
-  multi-window snapshots and observer attachment, cross-zone duplication,
-  native reordering, event-driven lazy SessionStore restoration (including a
-  nonempty-id false signal), restore timeout, unknown and throwing targets,
-  planning errors, uninstall cancellation, duplication failures, Essential
-  rejection, and no source-tab mutation
+  multi-window snapshots and observer attachment, default drag blocking,
+  optional duplication mode, multi-selection/cross-window/group fail-closed
+  behavior, source/destination workspace and container provenance, group-label
+  expansion (including normal-origin labels), split-view source/target handling,
+  out-of-window detachment blocking for tab/group/split/mixed sources and native
+  normal-tab detachment, unreadable group membership, same-zone native reorder,
+  event-driven lazy
+  SessionStore restoration (including a nonempty-id false signal), restore
+  timeout, unknown and throwing targets, planning errors, uninstall cancellation,
+  duplication failures, Essential rejection, and no source-tab mutation
 - injection bundling, CSS marker scoping, and Marionette framing/error handling
 
 `npm run zen:smoke` is the integration check against a real Zen process. It
@@ -418,12 +470,19 @@ close/unpin/removal guards, mixed multi-close, Zen's close shortcut, unloading,
 CSS close-button visibility, folder-contained tabs, locked context-menu
 restrictions without mutating Zen's native hidden state, intentional unpin and
 Remove-from-Essentials commands (including folder tabs and authorization
-cleanup), CSS/guards restored after uninstall, all four cross-zone transitions,
-same-zone and normal-tab dragging, deletion-safe failure paths, `about:config`
-duplication, an unknown-target negative control, delayed-restore cancellation by
-uninstall, reinstall after cancellation, multi-window attachment,
-restart/session restore, and shutdown. It is not part of `npm test` because it
-launches a browser.
+cleanup), default block behavior for all four cross-category transitions,
+multi-selection/folder/cross-window drag safety, two real workspaces, a
+non-default container workspace, container-specific Essentials incompatibility,
+group-label moves with before/after membership snapshots, split-view
+source/target drops with group-membership invariants, a real multi-selected
+same-category reorder using Zen's selection state, folder-to-folder membership
+through the native drop handler, protected and normal out-of-window dragend
+detachment checks, optional duplicate mode with non-default
+container identity, duplication failure/internal pages, same-zone and normal-tab
+dragging, deletion-safe failure paths, an unknown-target negative control,
+delayed-restore cancellation by uninstall, reinstall after cancellation,
+multi-window attachment, restart/session restore, and shutdown. It is not part of
+`npm test` because it launches a browser.
 
 A separate **real-input UI matrix** was run against a windowed Zen 1.23.4b test
 profile using xdotool (X11/XWayland), not direct API calls:
@@ -460,6 +519,36 @@ profile using xdotool (X11/XWayland), not direct API calls:
 - **Disposable profile only.** The harness creates an isolated profile, verifies
   `moz:profile`, and never edits `/opt/zen-browser-bin` or `~/.zen`.
 
+## Issue #5 acceptance
+
+- **Protected category survives every covered drag.** Cross-category,
+  cross-window, multi-tab, group/split-view, and unknown-target drops are blocked
+  before Zen demotes/adopts; source tabs remain in their original category.
+- **Safe organization remains native.** Same-category reordering, multi-selection
+  reordering within a category, and folder moves that stay in the same protected
+  category are delegated to Zen.
+- **Default cross-category drag is blocked.** No copy, no phantom/partial move,
+  no source category change.
+- **Optional duplicate mode preserves the original.** It is opt-in
+  (`svalinn.protectedDragBehavior = duplicate` or `setDragBehavior`); only the
+  proven single-tab/same-window transitions copy, and failures remove the copy.
+- **Unsupported paths fail closed.** Cross-window, workspace/container/group/
+  split-view, unknown-target, and multi-tab protected category changes do not
+  reach native demotion/adoption. Source and destination workspace/container
+  provenance is checked before delegation.
+- **Non-protected tabs keep native behavior.**
+- **Out-of-window detachment is blocked for protected sources.** The
+  `replaceTabsWithWindow` path reached from native `handle_dragend` is guarded for
+  tabs, group labels, split views, and mixed selections; native dragend cleanup
+  still runs, and normal-tab detachment remains native.
+- **Coverage.** Automated adapter tests and the real Zen smoke suite exercise
+  block mode, duplicate mode, safe same-zone/folder moves, multi-selection,
+  cross-window, two real workspaces, non-default container tabs,
+  container-specific Essentials, group labels, split-view source/target with
+  membership snapshots, folder-to-folder membership through the native drop
+  handler, out-of-window detachment blocking/invariants, failure cleanup, close
+  guards, restart, and shutdown.
+
 ## Known limitations
 
 - The adapter is a development/smoke harness, not a user-facing installation
@@ -477,9 +566,21 @@ profile using xdotool (X11/XWayland), not direct API calls:
 - Guards cover the tabbrowser close/unpin/Essential-removal entry points. Tab
   groups containing a protected tab are blocked entirely rather than partially
   closed.
-- Multi-selected tabs are filtered for close, but cross-zone duplication is
-  limited to a single tab in one window. Cross-window drags, folders, and split
-  views stay native.
+- Default drag behavior is `block`. Optional `duplicate` mode only copies a
+  single protected tab in the same window; cross-window, group/split-view,
+  workspace, and multi-tab transitions still fail closed.
+- Protected tabs cannot be detached out of the window; normal tabs still use native new-window detachment.
+- Same-category delegation requires matching source/destination workspace and,
+  for Essentials, container context; split-view or ambiguous group membership
+  blocks instead of moving.
+- Folder-to-folder acceptance uses a synthetic drop prepared with Zen's
+  collapsed-folder drop state; it goes through the native drop handler and
+  asserts membership, identity, container/workspace and tab count without direct
+  repair calls.
+- When a multi-selection includes a protected tab crossing categories, the whole
+  drop is blocked. Normal tabs in that selection stay open but do not move.
+- Independent per-category enable/disable for Essentials vs Pinned is not exposed
+  yet; both are protected.
 - Duplication waits for the SessionStore `SSTabRestored` event (bounded to 10
   seconds). If restoration does not complete, the copy is removed and the source
   is kept. Uninstalling cancels pending restoration work and removes unfinished

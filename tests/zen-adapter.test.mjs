@@ -37,6 +37,7 @@ function makeWindow({
       removeTab() {},
       removeTabs() {},
       removeCurrentTab() {},
+      replaceTabsWithWindow() {},
       moveTabsBefore() {},
       moveTabTo() {},
       tabContainer: {
@@ -269,21 +270,33 @@ test("hostile or missing globals never throw from install or snapshot", async ()
 
 function makeDropTab(url, { pinned = false, essential = false } = {}) {
   const attributes = new Set(essential ? ["zen-essential"] : []);
-  return {
+  const tab = {
     id: `tab-${url}-${Math.random().toString(36).slice(2)}`,
     url,
     pinned,
     selected: false,
+    workspaceId: essential ? null : "space-1",
+    userContextId: 0,
     linkedBrowser: { currentURI: { spec: url } },
     documentGlobal: null,
     hasAttribute: name => attributes.has(name),
-    setAttribute(name) {
+    setAttribute(name, value) {
+      if (name === "zen-workspace-id") {
+        tab.workspaceId = value;
+        return;
+      }
       attributes.add(name);
+    },
+    getAttribute(name) {
+      if (name === "zen-workspace-id") return tab.workspaceId;
+      if (name === "usercontextid") return String(tab.userContextId);
+      return null;
     },
     removeAttribute(name) {
       attributes.delete(name);
     },
   };
+  return tab;
 }
 
 function makeFakeDocument() {
@@ -397,6 +410,7 @@ function makeDropEnvironment() {
     unpinCalls: 0,
     removeEssentialsCalls: 0,
     unloadCalls: 0,
+    detachCalls: 0,
   };
   const tabs = [];
   const win = {};
@@ -422,6 +436,8 @@ function makeDropEnvironment() {
   const gBrowser = {
     tabs,
     isTab: tab => tabs.includes(tab),
+    isTabGroupLabel: item => Boolean(item?.isTabGroupLabel),
+    isSplitViewWrapper: item => Boolean(item?.isSplitViewWrapper),
     addTab() {},
     pinTab(tab) {
       tab.pinned = true;
@@ -485,6 +501,12 @@ function makeDropEnvironment() {
       stats.removeCurrentTabCalls += 1;
       this.removeTab(this.selectedTab);
     },
+    replaceTabsWithWindow(tab) {
+      stats.detachCalls += 1;
+      return { adopted: tab };
+    },
+    selectedElements: [],
+    selectedTabs: [],
     removeTabGroup(group) {
       stats.removeGroupCalls += 1;
       this.removeTabs(group.tabs);
@@ -553,6 +575,13 @@ function makeDropEnvironment() {
     gZenWorkspaces: {
       promiseInitialized: Promise.resolve(),
       _isClosingWindow: false,
+      activeWorkspace: "space-1",
+      activeWorkspaceElement: { contains: () => true },
+      containerSpecificEssentials: false,
+      getActiveWorkspaceFromCache: () => ({
+        uuid: "space-1",
+        containerTabId: 0,
+      }),
     },
     SessionStore: { promiseAllWindowsRestored: Promise.resolve() },
     delayedStartupPromise: Promise.resolve(),
@@ -577,9 +606,14 @@ function makeDropEnvironment() {
     dnd,
     nativeDrop,
     addTab,
-    drop(event, targetSelector = "normal") {
+    drop(event, targetSelector = "normal", targetWorkspace = null) {
       const target = {
         closest: selector => {
+          if (selector === "[zen-workspace-id]") {
+            return targetWorkspace
+              ? { getAttribute: () => targetWorkspace }
+              : null;
+          }
           if (targetSelector === "unknown") return null;
           if (targetSelector === "throws") {
             throw new Error("closest failed");
@@ -926,7 +960,7 @@ test("uninstall restores close hooks", async () => {
   assert.equal(env.tabs.includes(pinned), false);
 });
 
-test("cross-zone drops duplicate and preserve the protected source", async () => {
+test("block mode keeps protected tabs in their category on cross-zone drops", async () => {
   for (const [sourceZone, targetZone] of [
     ["essential", "normal"],
     ["essential", "pinned"],
@@ -934,6 +968,31 @@ test("cross-zone drops duplicate and preserve the protected source", async () =>
     ["pinned", "essential"],
   ]) {
     const env = await installDropEnvironment();
+    const source = env.addTab(`https://${sourceZone}.test`, {
+      pinned: true,
+      essential: sourceZone === "essential",
+    });
+    source._dragData = { movingTabs: [source] };
+    const before = env.tabs.length;
+
+    env.drop({ source }, targetZone);
+
+    assert.equal(env.tabs.length, before, `${sourceZone} -> ${targetZone}`);
+    assert.equal(env.api.classify(source).zone, sourceZone);
+    assert.equal(env.stats.nativeDrops, 0);
+    assert.equal(env.stats.duplicateCalls, 0);
+    assert.equal(env.api.pendingDuplications(), 0);
+  }
+});
+
+test("duplicate mode copies protected tabs across zones", async () => {
+  for (const [sourceZone, targetZone] of [
+    ["essential", "normal"],
+    ["essential", "pinned"],
+    ["pinned", "normal"],
+    ["pinned", "essential"],
+  ]) {
+    const env = await installDropEnvironment({ dragBehavior: "duplicate" });
     const source = env.addTab(`https://${sourceZone}.test`, {
       pinned: true,
       essential: sourceZone === "essential",
@@ -1002,7 +1061,7 @@ test("normal sources still use native behavior for unknown targets", async () =>
 });
 
 test("applies the destination zone after lazy SessionStore restore", async () => {
-  const env = await installDropEnvironment();
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
   env.stats.lazyDuplicate = true;
   const source = env.addTab("https://pinned.test", { pinned: true });
   const target = env.addTab("https://essential.test", {
@@ -1024,7 +1083,7 @@ test("applies the destination zone after lazy SessionStore restore", async () =>
 });
 
 test("does not treat a nonempty id as proof of restoration", async () => {
-  const env = await installDropEnvironment();
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
   env.stats.lazyDuplicate = "with-id";
   const source = env.addTab("https://pinned.test", { pinned: true });
   const target = env.addTab("https://essential.test", {
@@ -1047,7 +1106,10 @@ test("does not treat a nonempty id as proof of restoration", async () => {
 });
 
 test("restore timeout removes the pending copy and keeps the source", async () => {
-  const env = await installDropEnvironment({ restoreTimeoutMs: 20 });
+  const env = await installDropEnvironment({
+    restoreTimeoutMs: 20,
+    dragBehavior: "duplicate",
+  });
   env.stats.lazyDuplicate = "never";
   const source = env.addTab("https://pinned.test", { pinned: true });
   source._dragData = { movingTabs: [source] };
@@ -1062,7 +1124,7 @@ test("restore timeout removes the pending copy and keeps the source", async () =
 });
 
 test("uninstall cancels pending restoration before it can mutate tabs", async () => {
-  const env = await installDropEnvironment();
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
   env.stats.lazyDuplicate = true;
   const source = env.addTab("https://pinned.test", { pinned: true });
   source._dragData = { movingTabs: [source] };
@@ -1090,7 +1152,7 @@ test("uninstall cancels pending restoration before it can mutate tabs", async ()
 });
 
 test("window unload cancels pending restoration and detaches hooks", async () => {
-  const env = await installDropEnvironment();
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
   env.stats.lazyDuplicate = true;
   const source = env.addTab("https://pinned.test", { pinned: true });
   source._dragData = { movingTabs: [source] };
@@ -1134,7 +1196,7 @@ test("same-zone reordering and normal-tab drops stay native", async () => {
 });
 
 test("duplication failures leave the protected source untouched", async () => {
-  const env = await installDropEnvironment();
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
   const source = env.addTab("https://essential.test", {
     pinned: true,
     essential: true,
@@ -1149,7 +1211,7 @@ test("duplication failures leave the protected source untouched", async () => {
 });
 
 test("rejected Essential duplication removes the copy and keeps the source", async () => {
-  const env = await installDropEnvironment();
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
   const source = env.addTab("https://pinned.test", { pinned: true });
   source._dragData = { movingTabs: [source] };
   env.stats.rejectEssentials = true;
@@ -1161,20 +1223,251 @@ test("rejected Essential duplication removes the copy and keeps the source", asy
   assert.equal(env.api.classify(source).zone, "pinned");
 });
 
-test("cross-window and multi-tab drags stay native", async () => {
+test("cross-window and multi-tab protected drops fail closed", async () => {
   const env = await installDropEnvironment();
   const source = env.addTab("https://pinned.test", { pinned: true });
   source._dragData = { movingTabs: [source] };
 
   source.documentGlobal = { gBrowser: {} };
   env.drop({ source }, "normal");
-  assert.equal(env.stats.nativeDrops, 1);
+  assert.equal(env.stats.nativeDrops, 0);
+  assert.equal(env.api.classify(source).zone, "pinned");
 
   source.documentGlobal = env.win;
-  const other = env.addTab("https://other.test");
+  const other = env.addTab("https://other.test", { pinned: true });
   source._dragData = { movingTabs: [source, other] };
   env.drop({ source }, "normal");
-  assert.equal(env.stats.nativeDrops, 2);
+  assert.equal(env.stats.nativeDrops, 0);
+  assert.equal(env.api.classify(source).zone, "pinned");
+  assert.equal(env.api.classify(other).zone, "pinned");
+
+  const normalA = env.addTab("https://normal-a.test");
+  const normalB = env.addTab("https://normal-b.test");
+  normalA._dragData = { movingTabs: [normalA, normalB] };
+  env.drop({ source: normalA }, "pinned");
+  assert.equal(env.stats.nativeDrops, 1);
+});
+
+test("drag behavior setting is session-scoped and validated", async () => {
+  const env = await installDropEnvironment();
+  assert.equal(env.api.dragBehavior(), "block");
+  assert.equal(env.api.setDragBehavior("duplicate"), "duplicate");
+  assert.equal(env.api.dragBehavior(), "duplicate");
+  assert.equal(env.api.setDragBehavior("unknown"), "block");
+  assert.equal(env.api.dragBehavior(), "block");
+  assert.equal(env.api.snapshot().dragBehavior, "block");
+});
+
+test("multi-selection reordering within a zone stays native", async () => {
+  const env = await installDropEnvironment();
+  const first = env.addTab("https://pinned-a.test", { pinned: true });
+  const second = env.addTab("https://pinned-b.test", { pinned: true });
+  first._dragData = { movingTabs: [first, second] };
+
+  env.drop({ source: first }, "pinned");
+
+  assert.equal(env.stats.nativeDrops, 1);
+  assert.equal(env.stats.duplicateCalls, 0);
+  assert.equal(env.api.classify(first).zone, "pinned");
+  assert.equal(env.api.classify(second).zone, "pinned");
+});
+
+test("group/split-view moves containing a protected tab fail closed", async () => {
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const protectedChild = env.addTab("https://child.test", {
+    pinned: true,
+    essential: true,
+  });
+  const source = {
+    id: "group-label",
+    isTabGroupLabel: true,
+    group: { tabs: [pinned, protectedChild] },
+    documentGlobal: env.win,
+    _dragData: {},
+  };
+  source._dragData = { movingTabs: [source] };
+
+  env.drop({ source }, "normal");
+
+  assert.equal(env.stats.nativeDrops, 0);
+  assert.equal(env.stats.duplicateCalls, 0);
+  assert.equal(env.api.classify(protectedChild).zone, "essential");
+  assert.ok(env.tabs.includes(protectedChild));
+  assert.ok(env.tabs.includes(pinned));
+});
+
+test("workspace and container provenance are enforced for same-category drops", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const essential = env.addTab("https://essential.test", {
+    pinned: true,
+    essential: true,
+  });
+  pinned._dragData = { movingTabs: [pinned] };
+
+  pinned.workspaceId = "space-2";
+  env.drop({ source: pinned }, "pinned");
+  assert.equal(env.stats.nativeDrops, 0);
+  assert.equal(env.api.classify(pinned).zone, "pinned");
+
+  pinned.workspaceId = "space-1";
+  env.drop({ source: pinned }, "pinned", "space-2");
+  assert.equal(env.stats.nativeDrops, 0);
+
+  pinned.workspaceId = null;
+  env.drop({ source: pinned }, "pinned");
+  assert.equal(env.stats.nativeDrops, 0);
+  pinned.workspaceId = "space-1";
+
+  env.win.gZenWorkspaces.containerSpecificEssentials = true;
+  essential._dragData = { movingTabs: [essential] };
+  essential.userContextId = 1;
+  env.drop({ source: essential }, "essential");
+  assert.equal(env.stats.nativeDrops, 0);
+  assert.equal(env.api.classify(essential).zone, "essential");
+
+  essential.userContextId = 0;
+  env.drop({ source: essential }, "essential");
+  assert.equal(env.stats.nativeDrops, 1);
+});
+
+test("split-view involvement blocks even same-category protected drops", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  pinned._dragData = { movingTabs: [pinned] };
+  pinned.isSplitViewWrapper = true;
+
+  env.drop({ source: pinned }, "pinned");
+
+  assert.equal(env.stats.nativeDrops, 0);
+  assert.equal(env.stats.duplicateCalls, 0);
+  assert.equal(env.api.classify(pinned).zone, "pinned");
+});
+
+test("normal-source group labels expand protected children before delegation", async () => {
+  const env = await installDropEnvironment();
+  const normal = env.addTab("https://normal.test");
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const label = {
+    id: "label",
+    isTabGroupLabel: true,
+    group: { tabs: [normal, pinned] },
+    documentGlobal: env.win,
+    _dragData: { movingTabs: [] },
+  };
+  label._dragData = { movingTabs: [label] };
+
+  env.drop({ source: label }, "normal");
+  assert.equal(env.stats.nativeDrops, 0);
+  assert.equal(env.api.classify(pinned).zone, "pinned");
+  assert.ok(env.tabs.includes(pinned));
+
+  const normalLabel = {
+    id: "normal-label",
+    isTabGroupLabel: true,
+    group: {
+      tabs: [
+        env.addTab("https://normal-1.test"),
+        env.addTab("https://normal-2.test"),
+      ],
+    },
+    documentGlobal: env.win,
+    _dragData: {},
+  };
+  normalLabel._dragData = { movingTabs: [normalLabel] };
+  env.drop({ source: normalLabel }, "pinned");
+  assert.equal(env.stats.nativeDrops, 1);
+});
+
+test("unreadable group membership fails closed", async () => {
+  const env = await installDropEnvironment();
+  const label = {
+    id: "broken-label",
+    isTabGroupLabel: true,
+    group: {},
+    documentGlobal: env.win,
+    _dragData: {},
+  };
+  label._dragData = { movingTabs: [label] };
+
+  env.drop({ source: label }, "pinned");
+
+  assert.equal(env.stats.nativeDrops, 0);
+  assert.equal(env.stats.duplicateCalls, 0);
+});
+
+test("detachment of protected tabs is blocked before native migration", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const essential = env.addTab("https://essential.test", {
+    pinned: true,
+    essential: true,
+  });
+  const normal = env.addTab("https://normal.test");
+
+  assert.equal(env.win.gBrowser.replaceTabsWithWindow(pinned), null);
+  assert.equal(env.win.gBrowser.replaceTabsWithWindow(essential), null);
+  assert.equal(env.stats.detachCalls, 0);
+  assert.ok(env.tabs.includes(pinned));
+  assert.ok(env.tabs.includes(essential));
+
+  assert.notEqual(env.win.gBrowser.replaceTabsWithWindow(normal), null);
+  assert.equal(env.stats.detachCalls, 1);
+});
+
+test("group, split and multi-selection detachments fail closed", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+  const essential = env.addTab("https://essential.test", {
+    pinned: true,
+    essential: true,
+  });
+  const normal = env.addTab("https://normal.test");
+
+  const groupLabel = {
+    id: "detach-group",
+    isTabGroupLabel: true,
+    group: { tabs: [pinned, normal] },
+    documentGlobal: env.win,
+  };
+  assert.equal(env.win.gBrowser.replaceTabsWithWindow(groupLabel), null);
+
+  const splitWrapper = {
+    id: "detach-split",
+    isSplitViewWrapper: true,
+    tabs: [essential],
+    documentGlobal: env.win,
+  };
+  assert.equal(env.win.gBrowser.replaceTabsWithWindow(splitWrapper), null);
+
+  pinned.multiselected = true;
+  normal.multiselected = true;
+  env.win.gBrowser.selectedElements = [pinned, normal];
+  assert.equal(env.win.gBrowser.replaceTabsWithWindow(pinned), null);
+  pinned.multiselected = false;
+  normal.multiselected = false;
+  env.win.gBrowser.selectedElements = [];
+
+  const brokenLabel = {
+    id: "detach-broken",
+    isTabGroupLabel: true,
+    group: {},
+    documentGlobal: env.win,
+  };
+  assert.equal(env.win.gBrowser.replaceTabsWithWindow(brokenLabel), null);
+  assert.equal(env.stats.detachCalls, 0);
+  assert.ok(env.tabs.includes(pinned));
+  assert.ok(env.tabs.includes(essential));
+});
+
+test("uninstall restores native tab detachment", async () => {
+  const env = await installDropEnvironment();
+  const pinned = env.addTab("https://pinned.test", { pinned: true });
+
+  env.api.uninstall();
+  assert.notEqual(env.win.gBrowser.replaceTabsWithWindow(pinned), null);
+  assert.equal(env.stats.detachCalls, 1);
 });
 
 test("uninstall restores the native drop handler", async () => {

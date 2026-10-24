@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const ADAPTER_VERSION = "0.4.0";
+  const ADAPTER_VERSION = "0.5.0";
   const MARKER = "__svalinn";
   const DROP_HOOK = "__svalinnDropHook";
   const CLOSE_HOOK = "__svalinnCloseHook";
@@ -18,6 +18,7 @@
   const ACTIVE_ATTR = "svalinn-active";
   const MENU_BLOCK_ATTR = "svalinn-blocked";
   const ENABLED_PREF = "svalinn.enabled";
+  const DRAG_BEHAVIOR_PREF = "svalinn.protectedDragBehavior";
 
   const state = {
     installed: false,
@@ -30,6 +31,7 @@
     restoredTabs: new WeakSet(),
     restoreTimeoutMs: 10_000,
     authorization: null,
+    dragBehavior: "block",
   };
 
   function browserWindows() {
@@ -58,6 +60,25 @@
     } catch {
       return false;
     }
+  }
+
+  function normalizeDragBehavior(value) {
+    return value === "duplicate" ? "duplicate" : "block";
+  }
+
+  function prefDragBehavior() {
+    try {
+      return normalizeDragBehavior(
+        Services.prefs.getStringPref(DRAG_BEHAVIOR_PREF, "block")
+      );
+    } catch {
+      return "block";
+    }
+  }
+
+  function setDragBehavior(value) {
+    state.dragBehavior = normalizeDragBehavior(value);
+    return state.dragBehavior;
   }
 
   function withTimeout(promise, timeoutMs, message) {
@@ -130,15 +151,142 @@
     return null;
   }
 
+  function activeWorkspaceId(win) {
+    try {
+      return (
+        win?.gZenWorkspaces?.activeWorkspace ??
+        win?.gZenWorkspaces?.getActiveWorkspaceFromCache?.()?.uuid ??
+        null
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  function activeContainerId(win) {
+    try {
+      return (
+        win?.gZenWorkspaces?.getActiveWorkspaceFromCache?.()?.containerTabId ?? 0
+      );
+    } catch {
+      return 0;
+    }
+  }
+
+  function targetWorkspaceId(win, target) {
+    try {
+      const node = target?.closest?.("[zen-workspace-id]");
+      if (node) return node.getAttribute("zen-workspace-id");
+      if (target?.closest?.(".zen-essentials-container")) {
+        return activeWorkspaceId(win);
+      }
+      if (win?.gZenWorkspaces?.activeWorkspaceElement?.contains?.(target)) {
+        return activeWorkspaceId(win);
+      }
+    } catch {
+      // Unknown target workspace; callers fail closed for protected tabs.
+    }
+    return null;
+  }
+
+  function tabContainerId(tab) {
+    try {
+      return tab?.userContextId ?? Number(tab?.getAttribute?.("usercontextid") ?? 0);
+    } catch {
+      return 0;
+    }
+  }
+
+  function isSplitViewItem(win, item) {
+    try {
+      if (win?.gBrowser?.isSplitViewWrapper?.(item)) return true;
+      if (item?.splitview || item?.splitView) return true;
+      if (item?.group?.hasAttribute?.("split-view-group")) return true;
+    } catch {
+      return true;
+    }
+    return false;
+  }
+
+  function collectMovingTabs(win, source, movingTabs) {
+    const tabs = [];
+    const seen = new Set();
+    let uncertain = null;
+    let hasSplitView = false;
+
+    const visit = (item, depth = 0) => {
+      if (!item || uncertain) return;
+      if (seen.has(item)) return;
+      seen.add(item);
+      if (depth > 6) {
+        uncertain = "group-depth";
+        return;
+      }
+
+      try {
+        if (win?.gBrowser?.isTab?.(item)) {
+          tabs.push(item);
+          if (isSplitViewItem(win, item)) hasSplitView = true;
+          return;
+        }
+
+        if (win?.gBrowser?.isSplitViewWrapper?.(item)) {
+          hasSplitView = true;
+          const members = item.tabs;
+          if (!members || typeof members[Symbol.iterator] !== "function") {
+            uncertain = "split-members";
+            return;
+          }
+          for (const tab of members) visit(tab, depth + 1);
+          return;
+        }
+
+        if (win?.gBrowser?.isTabGroupLabel?.(item)) {
+          const members = item.group?.tabs;
+          if (!members || typeof members[Symbol.iterator] !== "function") {
+            uncertain = "group-members";
+            return;
+          }
+          for (const tab of members) visit(tab, depth + 1);
+          return;
+        }
+
+        // Some Zen folder/group implementations expose members directly.
+        const directMembers = item?.group?.tabs ?? item?.tabs;
+        if (directMembers && typeof directMembers[Symbol.iterator] === "function") {
+          if (item?.group?.hasAttribute?.("split-view-group")) {
+            hasSplitView = true;
+          }
+          for (const tab of directMembers) visit(tab, depth + 1);
+          return;
+        }
+
+        uncertain = "unknown-drag-item";
+      } catch {
+        uncertain = "unreadable-drag-item";
+      }
+    };
+
+    visit(source);
+    if (Array.isArray(movingTabs)) {
+      for (const item of movingTabs) visit(item);
+    }
+
+    return { tabs, uncertain, hasSplitView };
+  }
+
   /**
    * Classify a drop before Zen mutates anything.
    *
-   * - NATIVE: deliberately unsupported or non-protected case; delegate.
-   * - DUPLICATE: protected cross-zone move; copy instead of demoting.
-   * - BLOCK: protected in-scope move whose target/plan cannot be trusted.
+   * - NATIVE: non-protected or same-category organization; delegate.
+   * - DUPLICATE: optional safe single-tab cross-zone copy.
+   * - BLOCK: protected category change or unsupported path; keep source.
    */
   function planDrop(win, dnd, event) {
     let source = null;
+    let protectedTabs = [];
+    let collected = null;
+
     try {
       const dataTransfer = event?.dataTransfer;
       if (!dataTransfer || dataTransfer.dropEffect !== "move") {
@@ -151,29 +299,39 @@
       if (!types || types[0] !== dropType) return { action: "native" };
 
       source = dataTransfer.mozGetDataAt(dropType, 0);
-      if (!source || source.documentGlobal !== win) {
-        return { action: "native" };
-      }
-      if (!win.gBrowser?.isTab?.(source)) return { action: "native" };
+      if (!source) return { action: "native" };
 
-      const movingTabs = source._dragData?.movingTabs;
-      if (
-        !Array.isArray(movingTabs) ||
-        movingTabs.length !== 1 ||
-        movingTabs[0] !== source
-      ) {
-        return { action: "native" };
-      }
-    } catch (error) {
+      collected = collectMovingTabs(
+        win,
+        source,
+        source._dragData?.movingTabs
+      );
+    } catch {
       return { action: "native" };
     }
 
-    // From here the drop belongs to a protected-tab lifecycle. If anything is
-    // unclear, fail closed instead of letting native demote the source.
-    try {
-      const flags = readTabFlags(source);
-      if (!isProtected(flags)) return { action: "native" };
+    if (collected.uncertain) {
+      return {
+        action: "block",
+        source,
+        reason: `uncertain-members:${collected.uncertain}`,
+      };
+    }
 
+    protectedTabs = collected.tabs.filter(tab =>
+      isProtected(readTabFlags(tab))
+    );
+    if (!protectedTabs.length) return { action: "native" };
+
+    if (protectedTabs.some(tab => tab.documentGlobal !== win)) {
+      return {
+        action: "block",
+        source,
+        reason: "cross-window",
+      };
+    }
+
+    try {
       const targetZone = zoneFromTarget(event.target);
       if (!targetZone) {
         return {
@@ -183,20 +341,106 @@
         };
       }
 
-      const decision = decideDrop({
-        tab: flags,
-        targetZone,
-        sameWindow: true,
-        locked: true,
-      });
-      if (decision === "native") {
-        return { action: "native", source };
-      }
-      if (decision !== "duplicate") {
+      const targetTab = event.target?.closest?.(".tabbrowser-tab") ?? null;
+      if (
+        collected.hasSplitView ||
+        isSplitViewItem(win, event.target) ||
+        (targetTab && isSplitViewItem(win, targetTab))
+      ) {
         return {
           action: "block",
           source,
-          reason: `unsupported-decision:${decision}`,
+          reason: "split-view",
+        };
+      }
+
+      const activeWorkspace = activeWorkspaceId(win);
+      if (!activeWorkspace) {
+        return {
+          action: "block",
+          source,
+          reason: "workspace-unknown",
+        };
+      }
+
+      const targetWorkspace = targetWorkspaceId(win, event.target);
+      if (!targetWorkspace || targetWorkspace !== activeWorkspace) {
+        return {
+          action: "block",
+          source,
+          reason: "target-workspace-mismatch",
+        };
+      }
+
+      for (const tab of protectedTabs) {
+        const flags = readTabFlags(tab);
+        const tabWorkspace = flags.essential
+          ? activeWorkspace
+          : tab.getAttribute?.("zen-workspace-id");
+        if (!tabWorkspace) {
+          return {
+            action: "block",
+            source,
+            reason: "source-workspace-unknown",
+          };
+        }
+        if (tabWorkspace !== activeWorkspace) {
+          return {
+            action: "block",
+            source,
+            reason: "source-workspace-mismatch",
+          };
+        }
+      }
+
+      if (
+        targetZone === ZONES.ESSENTIAL &&
+        win.gZenWorkspaces?.containerSpecificEssentials
+      ) {
+        const targetContainer = activeContainerId(win);
+        for (const tab of protectedTabs) {
+          if (tabContainerId(tab) !== targetContainer) {
+            return {
+              action: "block",
+              source,
+              reason: "container-mismatch",
+            };
+          }
+        }
+      }
+
+      const movingTabs = source._dragData?.movingTabs;
+      const singleProtected =
+        win.gBrowser?.isTab?.(source) &&
+        protectedTabs.length === 1 &&
+        Array.isArray(movingTabs) &&
+        movingTabs.length === 1 &&
+        movingTabs[0] === source;
+
+      if (!singleProtected) {
+        const crossing = protectedTabs.filter(
+          tab => zoneOf(readTabFlags(tab)) !== targetZone
+        );
+        if (crossing.length) {
+          return {
+            action: "block",
+            source,
+            reason: "multi-or-group-cross-zone",
+          };
+        }
+        return { action: "native", source };
+      }
+
+      const flags = readTabFlags(source);
+      if (zoneOf(flags) === targetZone) {
+        return { action: "native", source };
+      }
+
+      if (state.dragBehavior !== "duplicate") {
+        return {
+          action: "block",
+          source,
+          reason: "protected-cross-zone",
         };
       }
 
@@ -411,12 +655,28 @@
    * Replace the tab strip's drop handler for one window.
    * @returns {boolean} false when the expected Zen internals are missing.
    */
+  function detachMembers(win, contextTab) {
+    const gBrowser = win?.gBrowser;
+    let movingTabs;
+    try {
+      movingTabs = contextTab?.multiselected
+        ? gBrowser?.selectedElements ?? gBrowser?.selectedTabs ?? []
+        : [contextTab];
+    } catch {
+      movingTabs = [contextTab];
+    }
+    return collectMovingTabs(win, contextTab, movingTabs);
+  }
+
   function installDropHook(win) {
     const dnd = win?.gBrowser?.tabContainer?.tabDragAndDrop;
     if (!dnd || typeof dnd.handle_drop !== "function") return false;
+    if (typeof win.gBrowser.replaceTabsWithWindow !== "function") return false;
     if (dnd[DROP_HOOK]) return true;
 
     const original = dnd.handle_drop;
+    const originalReplaceTabsWithWindow =
+      win.gBrowser.replaceTabsWithWindow;
     const restoredListener = event => {
       const tab = event?.target;
       if (!tab) return;
@@ -468,13 +728,45 @@
       return undefined;
     };
 
+    const patchedReplaceTabsWithWindow = function (contextTab, options) {
+      if (!state.installed || !state.enabled) {
+        return originalReplaceTabsWithWindow.call(this, contextTab, options);
+      }
+      const collection = detachMembers(win, contextTab);
+      if (collection.uncertain) {
+        state.warnings.push(
+          `detach-blocked:uncertain-members:${collection.uncertain}`
+        );
+        return null;
+      }
+      if (
+        collection.tabs.some(tab => isProtected(readTabFlags(tab)))
+      ) {
+        state.warnings.push("detach-blocked:protected-tab");
+        return null;
+      }
+      return originalReplaceTabsWithWindow.call(
+        this,
+        contextTab,
+        options
+      );
+    };
+
     Object.defineProperty(dnd, DROP_HOOK, {
-      value: { original, patched, restoredListener, unloadListener },
+      value: {
+        original,
+        patched,
+        restoredListener,
+        unloadListener,
+        originalReplaceTabsWithWindow,
+        patchedReplaceTabsWithWindow,
+      },
       configurable: true,
       writable: false,
       enumerable: false,
     });
     dnd.handle_drop = patched;
+    win.gBrowser.replaceTabsWithWindow = patchedReplaceTabsWithWindow;
     return true;
   }
 
@@ -495,6 +787,10 @@
         win.removeEventListener("unload", hook.unloadListener);
       }
       dnd.handle_drop = hook.original;
+      if (hook.originalReplaceTabsWithWindow) {
+        win.gBrowser.replaceTabsWithWindow =
+          hook.originalReplaceTabsWithWindow;
+      }
       delete dnd[DROP_HOOK];
     } catch (error) {
       state.warnings.push(`drop-unhook: ${error}`);
@@ -1011,6 +1307,7 @@
       adapter: ADAPTER_VERSION,
       installed: state.installed,
       enabled: state.enabled,
+      dragBehavior: state.dragBehavior,
       windows: state.windows.size,
       pending: state.pending.size,
       capabilities: state.capabilities,
@@ -1031,6 +1328,7 @@
       waitForStartup = true,
       timeoutMs = 30_000,
       restoreTimeoutMs = 10_000,
+      dragBehavior = null,
       allowUnverifiedVersion = false,
     } = options;
 
@@ -1041,6 +1339,9 @@
     state.enabled = enabled ?? prefEnabled();
     state.capabilities = null;
     state.restoreTimeoutMs = restoreTimeoutMs;
+    state.dragBehavior = normalizeDragBehavior(
+      dragBehavior ?? prefDragBehavior()
+    );
     state.warnings.length = 0;
     cancelAllPending("reinstall");
     state.restoredTabs = new WeakSet();
@@ -1128,6 +1429,7 @@
       adapter: ADAPTER_VERSION,
       installed: state.installed,
       enabled: state.enabled,
+      dragBehavior: state.dragBehavior,
       windows,
       warnings: [...state.warnings],
       pending: state.pending.size,
@@ -1165,6 +1467,8 @@
     closeGuardedWindows,
     pendingDuplications,
     performIntentionalAction,
+    setDragBehavior,
+    dragBehavior: () => state.dragBehavior,
     classify,
     policy: {
       ZONES,
