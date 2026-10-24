@@ -513,7 +513,12 @@ const makeTab = async ({ pinned = false, essential = false, url = null } = {}) =
   return tab;
 };
 
-const dispatchDrop = (source, target, movingTabs = [source]) => {
+const dispatchDrop = (
+  source,
+  target,
+  movingTabs = [source],
+  extraDragData = {}
+) => {
   source._dragData = {
     movingTabs,
     movingTabsSet: new Set(movingTabs),
@@ -524,6 +529,7 @@ const dispatchDrop = (source, target, movingTabs = [source]) => {
     translateY: (target.screenY ?? 0) - (source.screenY ?? 0),
     tabWidth: source.getBoundingClientRect().width || 200,
     tabHeight: source.getBoundingClientRect().height || 30,
+    ...extraDragData,
   };
   const dataTransfer = new win.DataTransfer();
   dataTransfer.mozSetDataAt(win.TAB_DROP_TYPE, source, 0);
@@ -835,7 +841,12 @@ const makeTab = async ({ pinned = false, essential = false, url = null, userCont
   return tab;
 };
 
-const dispatchDrop = (source, target, movingTabs = [source]) => {
+const dispatchDrop = (
+  source,
+  target,
+  movingTabs = [source],
+  extraDragData = {}
+) => {
   source._dragData = {
     movingTabs,
     movingTabsSet: new Set(movingTabs),
@@ -846,6 +857,7 @@ const dispatchDrop = (source, target, movingTabs = [source]) => {
     translateY: (target.screenY ?? 0) - (source.screenY ?? 0),
     tabWidth: source.getBoundingClientRect().width || 200,
     tabHeight: source.getBoundingClientRect().height || 30,
+    ...extraDragData,
   };
   const dataTransfer = new win.DataTransfer();
   dataTransfer.mozSetDataAt(win.TAB_DROP_TYPE, source, 0);
@@ -902,6 +914,7 @@ check(
 await workspaces.changeWorkspaceWithID(originalWorkspace);
 await wait(1200);
 const localPinned = await makeTab({ pinned: true });
+const localNormal = await makeTab();
 const localEssential = await makeTab({ essential: true });
 await dispatchDrop(containerPinned, localPinned);
 check(
@@ -933,14 +946,26 @@ const folderB = await makeTab({ pinned: true });
 const folder = win.gZenFolders.createFolder([folderA, folderB]);
 await wait(700);
 await dispatchDrop(folder, localPinned);
+const groupFolder = folderA.closest("zen-folder");
+const groupMembersBefore = (folder.tabs ?? [folderA, folderB]).map(tab => tab.id);
+const groupCountBefore = gBrowser.tabs.length;
+await dispatchDrop(folder, localNormal);
+await wait(800);
 check(
-  "drag-group-label-blocked",
+  "drag-group-label-cross-category-blocked",
   zone(folderA) === "pinned" && zone(folderB) === "pinned" &&
-    folderA.closest("zen-folder") !== null,
+    folderA.closest("zen-folder") === groupFolder &&
+    folderB.closest("zen-folder") === groupFolder &&
+    (folder.tabs ?? []).map(tab => tab.id).join(",") === groupMembersBefore.join(",") &&
+    gBrowser.tabs.length === groupCountBefore,
   {
     firstZone: zone(folderA),
     secondZone: zone(folderB),
-    inFolder: folderA.closest("zen-folder") !== null,
+    sameFolderA: folderA.closest("zen-folder") === groupFolder,
+    sameFolderB: folderB.closest("zen-folder") === groupFolder,
+    sameMembers:
+      (folder.tabs ?? []).map(tab => tab.id).join(",") === groupMembersBefore.join(","),
+    tabCountDelta: gBrowser.tabs.length - groupCountBefore,
   }
 );
 const beforeFolderNative = new Set(gBrowser.tabs);
@@ -959,31 +984,35 @@ check(
 const folderSecondTab = await makeTab({ pinned: true });
 const folderSecond = win.gZenFolders.createFolder([folderSecondTab]);
 await wait(700);
-let movedByDrop = false;
-try {
-  Object.defineProperty(folderA, "container", {
-    value: gBrowser.tabContainer,
-    configurable: true,
-  });
-  await dispatchDrop(folderA, folderSecond);
-  await wait(900);
-  movedByDrop = folderA.closest("zen-folder") === folderSecond;
-} catch {
-  movedByDrop = false;
-}
-if (!movedByDrop) folderSecond.addTabs([folderA]);
-await wait(700);
+const folderTabId = folderA.id;
+const folderTabContainer = folderA.userContextId;
+const folderTabWorkspace = folderA.getAttribute("zen-workspace-id");
+const folderCountBefore = gBrowser.tabs.length;
+await dispatchDrop(
+  folderA,
+  folderSecond.labelElement ?? folderSecond,
+  [folderA],
+  { shouldDropIntoCollapsedTabGroup: true }
+);
+await wait(1200);
 check(
   "folder-to-folder-membership",
   folderA.pinned === true &&
     zone(folderA) === "pinned" &&
-    folderA.closest("zen-folder") === folderSecond,
+    folderA.closest("zen-folder") === folderSecond &&
+    folderA.id === folderTabId &&
+    folderA.userContextId === folderTabContainer &&
+    folderA.getAttribute("zen-workspace-id") === folderTabWorkspace &&
+    gBrowser.tabs.length === folderCountBefore,
   {
     pinned: folderA.pinned,
     zone: zone(folderA),
     inTargetFolder: folderA.closest("zen-folder") === folderSecond,
-    viaDrop: movedByDrop,
-    sourceFolder: folder,
+    sameTab: folderA.id === folderTabId,
+    sameContainer: folderA.userContextId === folderTabContainer,
+    sameWorkspace: folderA.getAttribute("zen-workspace-id") === folderTabWorkspace,
+    tabCountDelta: gBrowser.tabs.length - folderCountBefore,
+    targetIsLabel: Boolean(folderSecond.labelElement),
   }
 );
 
@@ -992,17 +1021,25 @@ const splitA = await makeTab();
 const splitB = await makeTab();
 win.gZenViewSplitter.splitTabs([splitA, splitB], "grid", 0, { activate: false });
 await wait(700);
+const splitGroup = splitA.group;
+const splitMembers = (splitGroup?.tabs ?? [splitA, splitB]).map(tab => tab.id);
 const splitBefore = new Set(gBrowser.tabs);
 await dispatchDrop(localPinned, splitA);
 check(
   "drag-split-view-blocked",
   [...gBrowser.tabs].length === splitBefore.size &&
     zone(localPinned) === "pinned" &&
-    splitA.splitView === true,
+    splitA.splitView === true &&
+    splitA.group === splitGroup &&
+    splitB.group === splitGroup &&
+    (splitGroup?.tabs ?? []).map(tab => tab.id).join(",") === splitMembers.join(","),
   {
     added: [...gBrowser.tabs].length - splitBefore.size,
     sourceZone: zone(localPinned),
     split: splitA.splitView,
+    sameSplitGroup: splitA.group === splitGroup,
+    sameSplitMembers:
+      (splitGroup?.tabs ?? []).map(tab => tab.id).join(",") === splitMembers.join(","),
   }
 );
 
@@ -1013,16 +1050,28 @@ win.gZenViewSplitter.splitTabs([splitPinnedA, splitPinnedB], "grid", 0, {
   activate: false,
 });
 await wait(700);
+const splitPinnedGroup = splitPinnedA.group;
+const splitPinnedMembers = (splitPinnedGroup?.tabs ?? [splitPinnedA, splitPinnedB]).map(
+  tab => tab.id
+);
 await dispatchDrop(splitPinnedA, localPinned);
 check(
   "drag-split-view-source-blocked",
   zone(splitPinnedA) === "pinned" &&
     zone(splitPinnedB) === "pinned" &&
-    splitPinnedA.splitView === true,
+    splitPinnedA.splitView === true &&
+    splitPinnedA.group === splitPinnedGroup &&
+    splitPinnedB.group === splitPinnedGroup &&
+    (splitPinnedGroup?.tabs ?? []).map(tab => tab.id).join(",") ===
+      splitPinnedMembers.join(","),
   {
     firstZone: zone(splitPinnedA),
     secondZone: zone(splitPinnedB),
     split: splitPinnedA.splitView,
+    sameSplitGroup: splitPinnedA.group === splitPinnedGroup,
+    sameSplitMembers:
+      (splitPinnedGroup?.tabs ?? []).map(tab => tab.id).join(",") ===
+      splitPinnedMembers.join(","),
   }
 );
 
@@ -1031,21 +1080,28 @@ const multiA = await makeTab({ pinned: true });
 const multiB = await makeTab({ pinned: true });
 const multiC = await makeTab({ pinned: true });
 const multiBefore = new Set(gBrowser.tabs);
+gBrowser.selectedTab = multiC;
+gBrowser.addToMultiSelectedTabs(multiC);
+gBrowser.addToMultiSelectedTabs(multiB);
+const selectedMovingTabs = [...gBrowser.selectedTabs];
 const orderBefore = [...gBrowser.tabs].map(tab => tab.id);
-await dispatchDrop(multiC, multiA, [multiC, multiB]);
+await dispatchDrop(multiC, multiA, selectedMovingTabs);
 await wait(700);
+gBrowser.clearMultiSelectedTabs();
 const orderAfter = [...gBrowser.tabs].map(tab => tab.id);
 check(
   "drag-multi-same-category-native",
   [...gBrowser.tabs].length === multiBefore.size &&
     zone(multiA) === "pinned" &&
     zone(multiB) === "pinned" &&
+    selectedMovingTabs.length === 2 &&
     orderBefore.join(",") !== orderAfter.join(","),
   {
     added: [...gBrowser.tabs].length - multiBefore.size,
     firstZone: zone(multiA),
     secondZone: zone(multiB),
     orderChanged: orderBefore.join(",") !== orderAfter.join(","),
+    selectionSize: selectedMovingTabs.length,
   }
 );
 

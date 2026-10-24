@@ -447,11 +447,13 @@ Remove-from-Essentials commands (including folder tabs and authorization
 cleanup), default block behavior for all four cross-category transitions,
 multi-selection/folder/cross-window drag safety, two real workspaces, a
 non-default container workspace, container-specific Essentials incompatibility,
-group-label moves, split-view source/target drops, a real multi-selected
-same-category reorder, folder-to-folder membership, optional duplicate mode with
-non-default container identity, duplication failure/internal pages, same-zone and
-normal-tab dragging, deletion-safe failure paths, an unknown-target negative
-control, delayed-restore cancellation by uninstall, reinstall after cancellation,
+group-label moves with before/after membership snapshots, split-view
+source/target drops with group-membership invariants, a real multi-selected
+same-category reorder using Zen's selection state, folder-to-folder membership
+through the native drop handler, optional duplicate mode with non-default
+container identity, duplication failure/internal pages, same-zone and normal-tab
+dragging, deletion-safe failure paths, an unknown-target negative control,
+delayed-restore cancellation by uninstall, reinstall after cancellation,
 multi-window attachment, restart/session restore, and shutdown. It is not part of
 `npm test` because it launches a browser.
 
@@ -511,9 +513,9 @@ profile using xdotool (X11/XWayland), not direct API calls:
 - **Coverage.** Automated adapter tests and the real Zen smoke suite exercise
   block mode, duplicate mode, safe same-zone/folder moves, multi-selection,
   cross-window, two real workspaces, non-default container tabs,
-  container-specific Essentials, group labels, split-view source/target,
-  folder-to-folder membership, failure cleanup, close guards, restart, and
-  shutdown.
+  container-specific Essentials, group labels, split-view source/target with
+  membership snapshots, folder-to-folder membership through the native drop
+  handler, failure cleanup, close guards, restart, and shutdown.
 
 ## Known limitations
 
@@ -538,8 +540,10 @@ profile using xdotool (X11/XWayland), not direct API calls:
 - Same-category delegation requires matching source/destination workspace and,
   for Essentials, container context; split-view or ambiguous group membership
   blocks instead of moving.
-- Folder-to-folder membership is verified with Zen's native folder operations;
-  protected category retention is the guarded invariant.
+- Folder-to-folder acceptance uses a synthetic drop prepared with Zen's
+  collapsed-folder drop state; it goes through the native drop handler and
+  asserts membership, identity, container/workspace and tab count without direct
+  repair calls.
 - When a multi-selection includes a protected tab crossing categories, the whole
   drop is blocked. Normal tabs in that selection stay open but do not move.
 - Independent per-category enable/disable for Essentials vs Pinned is not exposed
