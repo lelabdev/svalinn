@@ -98,7 +98,7 @@ GitHub Actions runs the Node checks on Node 22 and 24. Browser smoke tests requi
 
 The working protection, personal installation and global Locked / Unlocked toggle are complete. Remaining improvements are tracked separately:
 
-1. [#21 — Native Zen contribution](https://github.com/lelabdev/svalinn/issues/21): investigate a focused upstream PR against `zen-browser/desktop`. No upstream acceptance or integration is claimed.
+1. [#21 — Native Zen contribution](https://github.com/lelabdev/svalinn/issues/21): investigate a focused upstream PR against `zen-browser/desktop`. No upstream acceptance or integration is claimed. See the [native contribution research plan](docs/upstream-native-plan.md) for the mapped call sites, proposed prefs/defaults and test plan.
 2. [#7 — Optional standalone release](https://github.com/lelabdev/svalinn/issues/7): decide whether a downloadable package is useful alongside a native contribution. [#8 — Logo](https://github.com/lelabdev/svalinn/issues/8) is deferred branding, not a release blocker.
 
 A related community request is [Zen Browser discussion #7050 — Idea on Pinned Tabs Functionality](https://github.com/zen-browser/desktop/discussions/7050).
