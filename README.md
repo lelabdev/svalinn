@@ -103,6 +103,14 @@ The working protection, personal installation and global Locked / Unlocked toggl
 
 A related community request is [Zen Browser discussion #7050 — Idea on Pinned Tabs Functionality](https://github.com/zen-browser/desktop/discussions/7050).
 
-## License
+## License and Zen Browser integration
 
-[MIT](LICENSE). You may use, modify and redistribute Svalinn under its terms. Zen Browser and other third-party projects retain their own licenses and trademarks; Svalinn is an independent community project.
+Svalinn is released under the [MIT License](LICENSE). You may use, modify and redistribute it provided the copyright and permission notice are preserved; the MIT badge at the top links to the same license file.
+
+[Zen Browser](https://github.com/zen-browser/desktop) is a separately developed upstream project licensed under [MPL-2.0](https://github.com/zen-browser/desktop/blob/dev/LICENSE). Zen's source files, assets and trademarks retain their own terms. Svalinn's MIT license does **not** relicense Zen Browser or any bundled third-party material. If future work introduces non-original assets or code, their notices must be inventoried and retained separately.
+
+Svalinn currently works as a **privileged, independent Zen customization**, installed through a small autoconfig bootloader. It is not an official Zen feature, a standard WebExtension, or a tagged standalone release. See [persistent installation, rollback and security warnings](docs/persistent-install.md) before installing it.
+
+A native contribution is only under research in [#21](https://github.com/lelabdev/svalinn/issues/21); the related community request is [Zen Discussion #7050](https://github.com/zen-browser/desktop/discussions/7050). No upstream pull request has been created, and no Zen maintainer endorsement, acceptance or shipped native integration is claimed. Only describe the feature as integrated after Zen accepts and ships it.
+
+Any future native port would be submitted under Zen's contribution requirements. MIT-licensed Svalinn code can be proposed for use in the MPL-2.0 project, but the actual upstream implementation, its license headers, attribution and review follow Zen's rules.
