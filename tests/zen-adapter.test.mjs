@@ -400,6 +400,9 @@ function makeDropEnvironment() {
     nativeDrops: 0,
     duplicateCalls: 0,
     throwOnDuplicate: false,
+    returnNullOnDuplicate: false,
+    throwOnMove: false,
+    throwOnEssentials: false,
     rejectEssentials: false,
     lazyDuplicate: false,
     selectedTab: null,
@@ -449,6 +452,7 @@ function makeDropEnvironment() {
     duplicateTab(source) {
       stats.duplicateCalls += 1;
       if (stats.throwOnDuplicate) throw new Error("duplicate failed");
+      if (stats.returnNullOnDuplicate) return null;
       const copy = makeDropTab(`${source.url}#copy`, {
         pinned: source.pinned,
         essential: source.hasAttribute("zen-essential"),
@@ -518,6 +522,7 @@ function makeDropEnvironment() {
       return true;
     },
     moveTabsBefore(moving, target) {
+      if (stats.throwOnMove) throw new Error("move failed");
       for (const tab of [...moving].reverse()) {
         const index = tabs.indexOf(tab);
         if (index !== -1) tabs.splice(index, 1);
@@ -526,6 +531,7 @@ function makeDropEnvironment() {
       }
     },
     moveTabTo(tab, { elementIndex }) {
+      if (stats.throwOnMove) throw new Error("move failed");
       const index = tabs.indexOf(tab);
       if (index !== -1) tabs.splice(index, 1);
       tabs.splice(Math.min(elementIndex, tabs.length), 0, tab);
@@ -550,6 +556,7 @@ function makeDropEnvironment() {
 
   const manager = {
     addToEssentials(tab) {
+      if (stats.throwOnEssentials) throw new Error("add essential failed");
       if (stats.rejectEssentials) return false;
       tab.pinned = true;
       tab.setAttribute("zen-essential");
@@ -1016,10 +1023,7 @@ test("duplicate mode copies protected tabs across zones", async () => {
 test("unrecognized or unsafe protected targets are blocked, not native", async () => {
   for (const mode of ["unknown", "throws"]) {
     const env = await installDropEnvironment();
-    const source = env.addTab("https://essential.test", {
-      pinned: true,
-      essential: true,
-    });
+    const source = env.addTab("https://pinned.test", { pinned: true });
     source._dragData = { movingTabs: [source] };
     const before = env.tabs.length;
 
@@ -1028,7 +1032,7 @@ test("unrecognized or unsafe protected targets are blocked, not native", async (
     assert.equal(env.stats.nativeDrops, 0, mode);
     assert.equal(env.stats.duplicateCalls, 0, mode);
     assert.equal(env.tabs.length, before, mode);
-    assert.equal(env.api.classify(source).zone, "essential", mode);
+    assert.equal(env.api.classify(source).zone, "pinned", mode);
     assert.equal(env.api.pendingDuplications(), 0, mode);
   }
 });
@@ -1193,6 +1197,72 @@ test("same-zone reordering and normal-tab drops stay native", async () => {
     assert.equal(env.stats.duplicateCalls, 0);
     assert.equal(env.tabs.length, before);
   }
+});
+
+test("copy failure stages never remove the original tab", async () => {
+  const stages = [
+    ["null-copy", { returnNullOnDuplicate: true }, "normal"],
+    ["move-failure", { throwOnMove: true }, "normal"],
+    ["essential-failure", { throwOnEssentials: true }, "essential"],
+  ];
+
+  for (const [label, options, targetZone] of stages) {
+    const env = await installDropEnvironment({ dragBehavior: "duplicate" });
+    const source = env.addTab("https://pinned.test", { pinned: true });
+    source._dragData = { movingTabs: [source] };
+    const before = {
+      id: source.id,
+      url: source.url,
+      pinned: source.pinned,
+      essential: source.hasAttribute("zen-essential"),
+      container: source.userContextId,
+      workspace: source.getAttribute("zen-workspace-id"),
+    };
+    Object.assign(env.stats, options);
+
+    env.drop({ source }, targetZone);
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    assert.ok(env.tabs.includes(source), label);
+    assert.equal(source.id, before.id, label);
+    assert.equal(source.url, before.url, label);
+    assert.equal(source.pinned, before.pinned, label);
+    assert.equal(
+      source.hasAttribute("zen-essential"),
+      before.essential,
+      label
+    );
+    assert.equal(source.userContextId, before.container, label);
+    assert.equal(
+      source.getAttribute("zen-workspace-id"),
+      before.workspace,
+      label
+    );
+    assert.equal(env.api.classify(source).zone, "pinned", label);
+    assert.equal(env.api.pendingDuplications(), 0, label);
+    assert.equal(
+      env.tabs.filter(tab => tab.url.includes("#copy")).length,
+      0,
+      label
+    );
+  }
+});
+
+test("reinstall restores safe drag defaults after an opt-in duplicate session", async () => {
+  const env = await installDropEnvironment({ dragBehavior: "duplicate" });
+  assert.equal(env.api.dragBehavior(), "duplicate");
+  env.api.uninstall();
+  const reinstalled = await env.api.install({ enabled: true });
+  assert.equal(reinstalled.status, "installed");
+  assert.equal(env.api.dragBehavior(), "block");
+
+  const source = env.addTab("https://pinned.test", { pinned: true });
+  source._dragData = { movingTabs: [source] };
+  const before = env.tabs.length;
+  env.drop({ source }, "normal");
+  assert.equal(env.tabs.length, before);
+  assert.equal(env.api.classify(source).zone, "pinned");
+  assert.equal(env.api.pendingDuplications(), 0);
 });
 
 test("duplication failures leave the protected source untouched", async () => {
