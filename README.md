@@ -19,53 +19,71 @@
 
 ## Current status
 
-**Close/unpin/removal protection, explicit per-tab unpin/removal, lifecycle-safe close/menu hiding, and drag category protection (block by default, optional duplication) implemented and smoke-tested.**
+**Close/unpin/removal protection, explicit per-tab unpin/removal, lifecycle-safe close/menu hiding, drag category protection (block by default, optional duplication), and a persistent personal loader are implemented and smoke-tested.**
 
 - `src/policy.mjs`: dependency-free, testable protection rules.
 - `tests/`: policy matrix plus adapter, capability, close-guard, drop-guard,
-  intentional-action, CSS-scope, bundling, and protocol tests. Run with
-  `npm test`.
+  intentional-action, CSS-scope, bundling, installer, and protocol tests. Run
+  with `npm test`.
 - `.github/workflows/ci.yml`: GitHub Actions runs `npm test` and `npm run check`
   on Node 22 and 24 for `main` pushes and every pull request.
 - `docs/manual-zen-checklist.md`: disposable-profile manual gesture checklist.
   Start a session with `npm run zen:manual`.
 - `src/zen/`: privileged adapter with close/demotion guards, default-block drag
   protection, optional copy-on-drop, lifecycle-scoped close/menu UI, per-tab
-  intentional actions, and a Marionette smoke harness.
+  intentional actions, a Marionette smoke harness, and a persistent personal
+  installer/loader.
+- `src/zen/persistent/` + `src/zen/install.mjs`: autoconfig bootloader and
+  profile-local loader. Normal browsing needs no Marionette or debug port.
 - `userChrome.css`: hides the close X/overlay for protected tabs only while the
   adapter is successfully installed (`:root[svalinn-active]`). CSS is not the
   security boundary.
 - `assets/icon.svg`: earlier provisional icon, not yet approved as final.
 
-Observed on **Zen 1.23.4b** (TufTux, Arch Linux): `ZenPinnedTabManager.mjs` includes `removeEssentials`, `addToEssentials`, `onCloseTabShortcut`, and `moveToAnotherTabContainerIfNecessary`. Dragging a Pinned to normal invokes `gBrowser.unpinTab`.
+## Personal installation
 
-Zen Mods are CSS-only. A true guard requires a privileged integration with browser chrome. With Svalinn enabled:
+Svalinn can be installed persistently for personal use in Zen. It uses a
+minimal autoconfig bootloader (the same class of mechanism as Sine/userChromeJS
+loaders, without depending on Sine) plus a trusted loader in the profile. It is
+not a published extension and does not use Marionette while browsing.
 
-- Close button, middle click, `Ctrl+W`, context-menu close, close-other/selected,
-  unpin, and Remove from Essentials are blocked for protected tabs.
-- Mixed multi-close still closes normal tabs and keeps protected tabs.
-- Normal tabs, unloading, browser quit, window close, and session restore stay
-  native.
-- Close X/overlay are hidden while active; destructive context-menu entries are
-  visually blocked without changing Zen's native menu state. Uninstall/disable
-  removes the marker and restores native affordances.
-- Right-click a protected tab for **Unpin This Pinned Tab** or **Remove This Tab
-  from Essentials**. Each runs the native action for that single tab only, under
-  a per-action authorization that ends with the call; no timer or global unlock.
-- Protected category is preserved on drag. Default behavior blocks
-  category-changing/cross-window/multi-tab/unsafe drops and out-of-window
-  detachment; same-category reordering and safe folder moves stay native.
-  Normal-tab detachment remains native. Copy-on-drop is optional
-  (`svalinn.protectedDragBehavior = duplicate`):
+```bash
+# Test against a copied installation first; any supplied root is copied.
+npm run zen:installed-smoke
+node src/zen/installed-smoke.mjs --install-root /tmp/opencode/zen-copy
 
-| Drag | Result |
-| --- | --- |
-| Reorder within Essentials/Pinned, or safe same-category folder move | Native |
-| Protected cross-category, cross-window, multi-tab, group/split, or unknown target | Block; source category preserved |
-| Optional duplicate mode, single tab/same window | Duplicate; source preserved; failures block |
-| Normal tabs | Native behavior |
+# Install/update into the resolved leaf profile, not the ~/.zen container.
+node src/zen/install.mjs --profile /path/to/profile \
+  --install-root /opt/zen-browser-bin
 
-The smoke harness validates these paths in a disposable profile:
+# Enable, disable, update, roll back or remove.
+node src/zen/install.mjs --profile /path/to/profile --install-root /opt/zen-browser-bin \
+  --disabled
+node src/zen/install.mjs --profile /path/to/profile --install-root /opt/zen-browser-bin \
+  --command rollback
+node src/zen/install.mjs --profile /path/to/profile --install-root /opt/zen-browser-bin \
+  --command uninstall
+```
+
+The installer resolves an explicit `profiles.ini` container to its unique default
+leaf profile and rejects an ambiguous container instead of writing into it. It
+backs up `user.js`, `chrome/userChrome.css` and the affected installation-root
+files before writing; the shared bootloader is activated last and restored if any
+write fails. It requires `--confirm-daily` for profiles under `~/.zen`, refuses
+foreign autoconfig files or loaders unless `--force` is reviewed, refuses
+mismatched or malformed rollback backups, and fails closed on unverified Zen
+versions. Installation changes only `svalinn.cfg`,
+`defaults/pref/svalinn-autoconfig.js`, and a small `svalinn-registry.json` in the
+installation root; the two loader files are shared and remain while another
+registered profile still uses Svalinn. No `/opt` patch is performed during
+development or smoke tests. See
+[`docs/persistent-install.md`](docs/persistent-install.md) for the full model,
+multi-profile behavior, status prefs, backups, rollback, sudo ownership handling,
+and troubleshooting.
+
+## Verification
+
+The normal adapter smoke suite is unchanged:
 
 ```bash
 npm run zen:smoke
@@ -82,9 +100,22 @@ group-label and split-view drops, folder-to-folder membership, multi-tab reorder
 protected/normal out-of-window detached dragend paths, optional duplicate mode
 with non-default container identity, same-zone/normal-tab behavior, failure
 safety, restart, then deletes the profile. It never patches
-`/opt/zen-browser-bin` and never uses `~/.zen`. See
-[`docs/zen-integration.md`](docs/zen-integration.md) for the mechanism, manual
-smoke matrix, security model, and rollback steps.
+`/opt/zen-browser-bin` and never uses `~/.zen`.
+
+The persistent-installed suite runs the same checks after installing the real
+bootloader/loader in a **copied** Zen installation. It first verifies startup
+without Marionette, then runs the full windowed/headless suite through the
+loaded adapter, including restart/session restore:
+
+```bash
+npm run zen:installed-smoke                 # headless, temporary install copy
+npm run zen:installed-smoke -- --headed     # visible window
+# --install-root selects the SOURCE tree; it is always copied before mutation.
+npm run zen:installed-smoke -- --install-root /tmp/opencode/zen-copy
+```
+
+See [`docs/zen-integration.md`](docs/zen-integration.md) for the mechanism,
+manual smoke matrix, security model, and rollback steps.
 
 ## Testing and CI
 
@@ -92,6 +123,7 @@ smoke matrix, security model, and rollback steps.
 npm test                 # Node VM/policy adapter tests
 npm run check            # syntax checks + full test suite
 npm run zen:smoke        # disposable real-Zen smoke (windowed/headless by flag)
+npm run zen:installed-smoke # persistent loader in a copied install (no /opt writes)
 npm run zen:manual       # disposable profile for the manual checklist
 ```
 
@@ -140,7 +172,14 @@ resolved. A “Lock Essentials” option was discussed there, but Svalinn's
 
 ## Next tasks
 
-1. Choose and document a maintainable deployment path for the adapter (the smoke harness is not a user installation), then test in a disposable Zen profile and verify Zen update compatibility before enabling in the main profile.
-2. Consider independent per-category protection and extend duplication to additional drag contexts only after their category semantics are verified.
+1. Verify the persistent loader against the next Zen release and update the
+   verified capability/version line, then re-run the installed smoke suite.
+2. Consider independent per-category protection and extend duplication to
+   additional drag contexts only after their category semantics are verified.
+3. Decide whether the personal loader should remain self-contained or integrate
+   with an external loader such as Sine after a separate review. Public release
+   is tracked separately (#7); this phase is personal use only.
 
-**Safety:** do not patch `/opt/zen-browser-bin` or enable experimental scripts in the daily profile during development.
+**Safety:** use the installer's backups and `--confirm-daily`; test with
+`zen:installed-smoke` and a copied installation before changing a daily profile.
+Never use `sudo` to run Zen itself.
