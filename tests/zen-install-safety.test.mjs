@@ -657,6 +657,47 @@ test("installed-smoke accepts an explicit headless flag and source root", () => 
   assert.equal(options.headless, true);
 });
 
+test("installed-smoke strips source Svalinn state from its copy", async () => {
+  const root = await makeTempRoot();
+  try {
+    const source = await makeFakeZen(path.join(root, "zen"));
+    await fs.mkdir(path.join(source, "defaults", "pref"), { recursive: true });
+    await fs.writeFile(
+      path.join(source, "svalinn.cfg"),
+      "// Svalinn autoconfig bootloader.\nsource\n"
+    );
+    await fs.writeFile(
+      path.join(source, "defaults", "pref", "svalinn-autoconfig.js"),
+      '// Svalinn managed autoconfig entry point.\npref("general.config.filename", "svalinn.cfg");\n'
+    );
+    await fs.writeFile(
+      path.join(source, REGISTRY_FILE),
+      `${JSON.stringify({
+        schema: 1,
+        managedBy: "svalinn",
+        installRoot: source,
+        profiles: [],
+      })}\n`
+    );
+
+    const copied = await copyInstallation(source);
+    try {
+      for (const relative of [
+        "svalinn.cfg",
+        "defaults/pref/svalinn-autoconfig.js",
+        REGISTRY_FILE,
+      ]) {
+        assert.equal(await exists(path.join(copied.root.root, relative)), false);
+        assert.equal(await exists(path.join(source, relative)), true);
+      }
+    } finally {
+      await fs.rm(copied.copy, { recursive: true, force: true });
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("the smoke harness refuses to install into a live Zen root", async () => {
   const root = await makeTempRoot();
   const previous = process.env.SVALINN_ZEN_ROOT;

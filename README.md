@@ -6,7 +6,7 @@
 
 ## Intended behavior
 
-| Operation | Locked behavior |
+| Operation | Locked behavior (default) |
 | --- | --- |
 | Close an Essential or Pinned (X, middle click, Ctrl+W, context menu) | Block |
 | Remove from Essentials / Unpin | Blocked by default; explicit per-tab command allows one action |
@@ -14,30 +14,41 @@
 | Optional `protectedDragBehavior=duplicate` | Copy safe single-tab cross-category transitions; source preserved |
 | Reorder within its own category | Allow |
 | Unload protected tab | Allow |
-| Explicit per-tab Unpin / Remove from Essentials command | Allow that one intentional action; no timer or global unlock |
+| Explicit per-tab Unpin / Remove from Essentials command | Allow that one intentional action (Locked only) |
+| Global **Protect Pinned & Essentials** checkbox | Locked: checked. Unlocked: native Zen close/unpin/remove/drag behavior for Pinned and Essential tabs |
 | Normal tabs | Keep Zen's native behavior |
+
+Right-click any Pinned or Essential tab and use the single global
+**Protect Pinned & Essentials** checkbox. Checked means **Locked** (default);
+unchecked means **Unlocked**. Unlocking suspends every Svalinn close, unpin,
+Essential-removal, drag and detach guard and restores native Zen behavior; it
+does not move, close, unpin, or recreate any tab. Re-checking restores the guards
+immediately in every window. The choice persists across normal browser restarts;
+a fresh profile starts Locked. `protectedDragBehavior=duplicate` remains a
+separate low-level preference, not a third lock state.
 
 ## Current status
 
-**Close/unpin/removal protection, explicit per-tab unpin/removal, lifecycle-safe close/menu hiding, drag category protection (block by default, optional duplication), and a persistent personal loader are implemented and smoke-tested.**
+**Close/unpin/removal protection, explicit per-tab unpin/removal, lifecycle-safe close/menu hiding, drag category protection (block by default, optional duplication), a global Locked / Unlocked toggle, and a persistent personal loader are implemented and smoke-tested.**
 
 - `src/policy.mjs`: dependency-free, testable protection rules.
 - `tests/`: policy matrix plus adapter, capability, close-guard, drop-guard,
-  intentional-action, CSS-scope, bundling, installer, and protocol tests. Run
-  with `npm test`.
+  intentional-action, lock-toggle synchronization/persistence, CSS-scope,
+  bundling, installer, and protocol tests. Run with `npm test`.
 - `.github/workflows/ci.yml`: GitHub Actions runs `npm test` and `npm run check`
   on Node 22 and 24 for `main` pushes and every pull request.
 - `docs/manual-zen-checklist.md`: disposable-profile manual gesture checklist.
   Start a session with `npm run zen:manual`.
 - `src/zen/`: privileged adapter with close/demotion guards, default-block drag
   protection, optional copy-on-drop, lifecycle-scoped close/menu UI, per-tab
-  intentional actions, a Marionette smoke harness, and a persistent personal
-  installer/loader.
+  intentional actions, a global protection toggle, a Marionette smoke harness,
+  and a persistent personal installer/loader.
 - `src/zen/persistent/` + `src/zen/install.mjs`: autoconfig bootloader and
   profile-local loader. Normal browsing needs no Marionette or debug port.
 - `userChrome.css`: hides the close X/overlay for protected tabs only while the
-  adapter is successfully installed (`:root[svalinn-active]`). CSS is not the
-  security boundary.
+  adapter is installed and locked
+  (`:root[svalinn-active]:not([svalinn-unlocked])`). CSS is not the security
+  boundary.
 - `assets/icon.svg`: earlier provisional icon, not yet approved as final.
 
 ## Personal installation
@@ -93,8 +104,9 @@ It launches an isolated profile with `userChrome.css`, verifies pre-install CSS 
 inert, normal/Pinned/Essential mapping, close/unpin/removal guards, mixed
 multi-close, the Zen close shortcut, unloading, CSS close-button visibility,
 folder-contained tabs, context-menu restrictions that preserve Zen's native
-state, intentional unpin/Remove-from-Essentials commands, uninstall restoring
-native affordances, default drag blocking, multi/folder/cross-window safety,
+state, intentional unpin/Remove-from-Essentials commands, the global Locked /
+Unlocked checkbox (native close/unpin while unlocked, relock, multi-window and
+restart persistence), uninstall restoring native affordances, default drag blocking, multi/folder/cross-window safety,
 two real workspaces, a non-default container, container-specific Essentials,
 group-label and split-view drops, folder-to-folder membership, multi-tab reorder,
 protected/normal out-of-window detached dragend paths, optional duplicate mode

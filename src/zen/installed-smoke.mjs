@@ -13,7 +13,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { inspectInstallRoot, install as installPersistent } from "./install-lib.mjs";
+import {
+  REGISTRY_FILE,
+  SHARED_FILES,
+  inspectInstallRoot,
+  install as installPersistent,
+} from "./install-lib.mjs";
 import { preflightInstalledStartup, runSmoke } from "./smoke.mjs";
 
 function requireValue(argv, index, flag) {
@@ -126,6 +131,14 @@ export async function copyInstallation(source) {
     force: true,
     verbatimSymlinks: true,
   });
+
+  // The source may already have Svalinn installed. The smoke test must start
+  // from a clean installation root, so never carry Svalinn's shared bootloader
+  // or registry (which records the source root) into the disposable copy.
+  for (const relative of [...SHARED_FILES, REGISTRY_FILE]) {
+    await fs.rm(path.join(copy, relative), { force: true });
+  }
+
   return {
     copy,
     root: await inspectInstallRoot(copy),

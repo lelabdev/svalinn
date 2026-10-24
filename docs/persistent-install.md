@@ -188,6 +188,24 @@ the Svalinn block leaves any user CSS intact.
 `block` is the default. `duplicate` retains the existing copy-on-drop behavior
 for safe single-tab cross-category drops.
 
+### Global Locked / Unlocked
+
+Right-click any Pinned or Essential tab and use the single **Protect Pinned &
+Essentials** checkbox. Checked = Locked (default), unchecked = Unlocked. The
+state applies to every window and every Pinned/Essential tab, not per tab.
+
+- Unlock suspends Svalinn's close, unpin, removal, drag and detach guards; Zen's
+  own native behavior applies. The click itself never changes a tab.
+- Relock restores the guards immediately in all windows.
+- The state is persisted in `svalinn.locked` (default `true`). It is intentionally
+  **not** written to the managed `user.js` block, so an explicit toggle survives a
+  normal browser restart; writing it to `user.js` would reset it at every startup.
+  Do not add `svalinn.locked` to a custom `user.js` if you want the menu toggle to
+  persist.
+- A fresh profile has no `svalinn.locked` value and therefore starts Locked.
+- `svalinn.enabled` remains the installation-level enable/disable switch; the
+  Locked/Unlocked checkbox only exists while the adapter is installed.
+
 ## Status, update, backup, rollback, uninstall
 
 ```bash
@@ -246,6 +264,7 @@ The loader writes these prefs, which are useful when diagnosing startup:
 | `svalinn.lastError` | Last loader error, empty when healthy |
 | `svalinn.loaderVersion` | Profile loader version (`0.1.0`) |
 | `svalinn.guardWindows` | Windows attached when installation completed |
+| `svalinn.locked` | Global protection toggle: `true` Locked (default), `false` Unlocked |
 
 `prefs.js` is normally flushed when Zen shuts down. You can also inspect the
 status with `about:config` while Zen is running.

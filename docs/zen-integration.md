@@ -187,13 +187,15 @@ the run before any privileged script executes.
 
 Issue #4 hides accidental close affordances, prevents destructive menu commands
 from appearing actionable, and provides explicit per-tab commands for intentional
-unpin/removal. There is no global unlock mode, padlock icon, toolbar button, or
-timed authorization.
+unpin/removal. There is no padlock icon, toolbar button, or timed authorization.
+Global protection is controlled only by the explicit Locked / Unlocked checkbox
+described in [Issue #20 acceptance](#issue-20-acceptance).
 
 ### Close affordance CSS
 
 `userChrome.css` hides the close button/overlay for Pinned and Essential tabs
-only inside a window with the `svalinn-active` marker:
+only inside a window with the `svalinn-active` marker that is also currently
+locked (`:root[svalinn-active]:not([svalinn-unlocked])`):
 
 ```css
 :root[svalinn-active] .tabbrowser-tab[pinned] .tab-close-button { ... }
@@ -538,6 +540,9 @@ npm run zen:installed-smoke
   SessionStore restoration (including a nonempty-id false signal), restore
   timeout, unknown and throwing targets, planning errors, uninstall cancellation,
   duplication failures, Essential rejection, and no source-tab mutation
+- global Locked/Unlocked menu semantics, native close/unpin/drop/detach while
+  unlocked, relock propagation, multi-window/new-window synchronization, pending
+  duplication cancellation, preference-write failure, and restart persistence
 - injection bundling, CSS marker scoping, and Marionette framing/error handling
 - installer `user.js` merge/remove idempotence, install-root validation,
   autoconfig conflict detection, backup/install/status/uninstall on temporary
@@ -621,9 +626,8 @@ profile using xdotool (X11/XWayland), not direct API calls:
   Pinned Tab**, or an Essential for **Remove This Tab from Essentials**. Each
   executes the native Zen action for that single tab only.
 - **Protection returns automatically.** Authorization is held only for the
-  synchronous native call, cleared in `finally`; there is no timer, global unlock,
-  or persistent state. Failed, cancelled, and repeated calls leave no
-  authorization.
+  synchronous native call, cleared in `finally`; there is no timer or persistent
+  per-tab state. Failed, cancelled, and repeated calls leave no authorization.
 - **Normal-tab controls remain native.** Normal tabs keep their close X, menu
   items, middle click, and `Ctrl+W`; the Svalinn commands are hidden.
 - **CSS is not the security boundary.** Behavioral guards block close/unpin/
@@ -693,6 +697,38 @@ profile using xdotool (X11/XWayland), not direct API calls:
 - **Version prerequisites.** Zen 1.23.4b and Node 22+ are stated in the checklist
   and integration documentation; newer Zen versions fail capability/version
   checks until revalidated.
+
+## Issue #20 acceptance
+
+- **Exactly two global states.** One native checkbox item, **Protect Pinned &
+  Essentials**, on the Pinned/Essential tab context menu. Checked = Locked
+  (default); unchecked = Unlocked. There is no third mode and no per-tab toggle.
+- **Locked preserves #3–#5.** Close/Ctrl+W/middle-click, unpin, Essential removal,
+  cross-zone moves and detach are blocked; same-zone reorder, supported folder
+  organization, unload and shutdown remain native. `protectedDragBehavior` stays a
+  separate low-level preference.
+- **Unlocked restores native Zen.** The drop, detach and close/unpin/removal guards
+  delegate to Zen, Svalinn's intentional per-tab entries are hidden, and the menu's
+  native commands lose their `svalinn-blocked` marks. Normal tabs are native in
+  both states. Toggling changes no tab, zone, or session data.
+- **Atomic and synchronized.** `Services.prefs.setBoolPref("svalinn.locked", …)` is
+  written first; every open window is then updated. A failed write or window sync
+  reverts both the pref and all windows. New windows created while unlocked attach
+  with the same state, and each `popupshowing` refreshes the checkbox.
+- **Persistence and safe default.** `svalinn.locked` defaults to `true` when
+  absent, so a fresh install is Locked. An explicit toggle survives normal restarts
+  because it is stored in `prefs.js`, not in the managed `user.js` block.
+  Unsupported or disabled installs expose no lock control and claim no state.
+- **Cleanup.** The checkbox and separator are removed on uninstall, and window
+  detach removes the `svalinn-unlocked` marker. Repeated install/uninstall cycles
+  do not duplicate menu items or listeners.
+- **Verification.** Unit/VM tests cover menu semantics, native close/unpin/drop/
+  detach when unlocked, relock, multi-window and new-window synchronization,
+  pending duplication cancellation, pref-write failure, and persistence. Real Zen
+  smoke covers Locked → Unlocked → Locked, menu indication, native actions,
+  multiple windows, and restart persistence in injected and persistent installs.
+
+
 
 ## Issue #12 acceptance
 

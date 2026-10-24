@@ -1801,6 +1801,128 @@ check(
   { pinned: folderTab.pinned, zone: zone(folderTab) }
 );
 
+// One global Locked / Unlocked checkbox.
+const lockItem = doc.getElementById("context_svalinn-protect");
+const lockSeparator = doc.getElementById("context_svalinn-protect-separator");
+const toggleLockedTab = await makeTab({ pinned: true });
+const toggleNormalTab = await makeTab();
+
+await showMenuFor(toggleLockedTab);
+check(
+  "lock-menu-visible-locked",
+  Boolean(lockItem) &&
+    Boolean(lockSeparator) &&
+    lockItem.hidden === false &&
+    lockSeparator.hidden === false &&
+    lockItem.checked === true &&
+    lockItem.getAttribute("checked") === "true" &&
+    /Protect Pinned & Essentials/.test(lockItem.getAttribute("label")) &&
+    closeDisplay(toggleLockedTab) === "none",
+  {
+    present: Boolean(lockItem),
+    hidden: lockItem?.hidden,
+    checked: lockItem?.checked,
+    label: lockItem?.getAttribute("label"),
+    closeDisplay: closeDisplay(toggleLockedTab),
+  }
+);
+
+await showMenuFor(toggleNormalTab);
+check(
+  "lock-menu-hidden-on-normal-tab",
+  lockItem.hidden === true && lockSeparator.hidden === true,
+  { hidden: lockItem.hidden, separatorHidden: lockSeparator.hidden }
+);
+
+await showMenuFor(toggleLockedTab);
+lockItem.dispatchEvent(new win.Event("command", { bubbles: true }));
+await wait(150);
+check(
+  "unlocked-global-state",
+  api.snapshot().locked === false &&
+    Services.prefs.getBoolPref("svalinn.locked", true) === false &&
+    doc.documentElement.hasAttribute("svalinn-unlocked"),
+  {
+    locked: api.snapshot().locked,
+    pref: Services.prefs.getBoolPref("svalinn.locked", true),
+    marker: doc.documentElement.hasAttribute("svalinn-unlocked"),
+  }
+);
+
+await showMenuFor(toggleLockedTab);
+check(
+  "unlocked-menu-indication",
+  lockItem.checked === false &&
+    lockItem.getAttribute("checked") === "false" &&
+    /unlocked/i.test(lockItem.getAttribute("label")) &&
+    unpinItem.hidden === true &&
+    removeItem.hidden === true &&
+    !blocked("context_closeTab") &&
+    !blocked("context_unpinTab") &&
+    !blocked("context_zen-remove-essential"),
+  {
+    checked: lockItem.checked,
+    label: lockItem.getAttribute("label"),
+    unpinVisible: !unpinItem.hidden,
+    removeVisible: !removeItem.hidden,
+    closeBlocked: blocked("context_closeTab"),
+    unpinBlocked: blocked("context_unpinTab"),
+  }
+);
+
+check(
+  "unlocked-close-controls-native",
+  doc.documentElement.hasAttribute("svalinn-unlocked") &&
+    !blocked("context_closeTab"),
+  {
+    unlocked: doc.documentElement.hasAttribute("svalinn-unlocked"),
+    closeDisplay: closeDisplay(toggleLockedTab),
+    closeBlocked: blocked("context_closeTab"),
+  }
+);
+
+gBrowser.removeTab(toggleLockedTab);
+check(
+  "unlocked-native-close",
+  !tabsInclude(toggleLockedTab),
+  { present: tabsInclude(toggleLockedTab) }
+);
+
+const unlockNativeUnpin = await makeTab({ pinned: true });
+gBrowser.unpinTab(unlockNativeUnpin);
+check(
+  "unlocked-native-unpin",
+  unlockNativeUnpin.pinned === false && zone(unlockNativeUnpin) === "normal",
+  { pinned: unlockNativeUnpin.pinned, zone: zone(unlockNativeUnpin) }
+);
+
+const relockTab = await makeTab({ pinned: true });
+await showMenuFor(relockTab);
+lockItem.dispatchEvent(new win.Event("command", { bubbles: true }));
+await wait(150);
+check(
+  "relocked-global-state",
+  api.snapshot().locked === true &&
+    Services.prefs.getBoolPref("svalinn.locked", true) === true &&
+    !doc.documentElement.hasAttribute("svalinn-unlocked") &&
+    lockItem.checked === true &&
+    closeDisplay(relockTab) === "none",
+  {
+    locked: api.snapshot().locked,
+    pref: Services.prefs.getBoolPref("svalinn.locked", true),
+    marker: doc.documentElement.hasAttribute("svalinn-unlocked"),
+    checked: lockItem.checked,
+    closeDisplay: closeDisplay(relockTab),
+  }
+);
+
+gBrowser.removeTab(relockTab);
+check(
+  "relocked-close-blocked",
+  tabsInclude(relockTab) && blocked("context_closeTab"),
+  { present: tabsInclude(relockTab), closeBlocked: blocked("context_closeTab") }
+);
+
 return {
   results,
   activeMarker: doc.documentElement.hasAttribute("svalinn-active"),
@@ -1992,7 +2114,7 @@ return { display, activeMarker };
     });
     record(
       "adapter-injected",
-      injected.adapter === "0.5.0" &&
+      injected.adapter === "0.6.0" &&
         injected.policy.length >= 4 &&
         (!options.installed || injected.installed === true),
       injected
@@ -2240,6 +2362,52 @@ const secondActiveMarker = second.document.documentElement.hasAttribute(
 const secondMenuStyle = Boolean(
   second.document.getElementById("svalinn-menu-style")
 );
+const secondTab = second.gBrowser.selectedTab;
+if (secondTab) second.gBrowser.pinTab(secondTab);
+await new Promise(resolve => setTimeout(resolve, 200));
+const secondMenu = second.document.getElementById("tabContextMenu");
+second.TabContextMenu.contextTab = secondTab;
+second.TabContextMenu.contextTabs = secondTab ? [secondTab] : [];
+second.TabContextMenu.multiselected = false;
+second.TabContextMenu.updateContextMenu(secondMenu);
+secondMenu.dispatchEvent(new second.Event("popupshowing", { bubbles: true }));
+const secondLock = second.document.getElementById("context_svalinn-protect");
+const secondCheckedLocked = Boolean(secondLock?.checked);
+const secondUnlockedBefore =
+  second.document.documentElement.hasAttribute("svalinn-unlocked");
+
+globalThis.Svalinn.setLocked(false);
+const firstUnlocked = win.document.documentElement.hasAttribute(
+  "svalinn-unlocked"
+);
+const secondUnlocked = second.document.documentElement.hasAttribute(
+  "svalinn-unlocked"
+);
+second.TabContextMenu.updateContextMenu(secondMenu);
+const secondCheckedUnlocked = Boolean(secondLock?.checked);
+
+const third = win.OpenBrowserWindow();
+await new Promise(resolve =>
+  third.addEventListener("load", resolve, { once: true })
+);
+const thirdDeadline = Date.now() + 5000;
+while (Date.now() < thirdDeadline && !third.__svalinn) {
+  await new Promise(resolve => setTimeout(resolve, 100));
+}
+const thirdAttached = Boolean(third.__svalinn);
+const thirdUnlocked = third.document.documentElement.hasAttribute(
+  "svalinn-unlocked"
+);
+
+globalThis.Svalinn.setLocked(true);
+const relocked =
+  !win.document.documentElement.hasAttribute("svalinn-unlocked") &&
+  !second.document.documentElement.hasAttribute("svalinn-unlocked") &&
+  !third.document.documentElement.hasAttribute("svalinn-unlocked");
+second.TabContextMenu.updateContextMenu(secondMenu);
+const secondCheckedRelocked = Boolean(secondLock?.checked);
+
+third.close();
 const closeGuarded = globalThis.Svalinn.closeGuardedWindows();
 const snapshot = globalThis.Svalinn.snapshot();
 const windows = snapshot.windows.length;
@@ -2253,6 +2421,25 @@ return {
   secondCloseHooked,
   secondActiveMarker,
   secondMenuStyle,
+  secondCheckedLocked,
+  secondUnlockedBefore,
+  firstUnlocked,
+  secondUnlocked,
+  secondCheckedUnlocked,
+  thirdAttached,
+  thirdUnlocked,
+  relocked,
+  secondCheckedRelocked,
+  lockSynced:
+    secondCheckedLocked === true &&
+    secondUnlockedBefore === false &&
+    firstUnlocked === true &&
+    secondUnlocked === true &&
+    secondCheckedUnlocked === false &&
+    thirdAttached === true &&
+    thirdUnlocked === true &&
+    relocked === true &&
+    secondCheckedRelocked === true,
   closeGuarded,
   windows,
   windowsWithManager,
@@ -2272,6 +2459,7 @@ return {
         multi.secondCloseHooked === true &&
         multi.secondActiveMarker === true &&
         multi.secondMenuStyle === true &&
+        multi.lockSynced === true &&
         multi.closeGuarded >= 2 &&
         multi.windows >= 2 &&
         multi.windowsWithManager >= 2 &&
@@ -2288,11 +2476,21 @@ return {
       phase = "restart";
       const expected = zones;
       await runAdapter(client, `return api.install({ enabled: true });`);
+      const unlockedBeforeRestart = await runAdapter(
+        client,
+        `return api.setLocked(false);`
+      );
       await shutdown();
       log("Restarting Zen with the same profile...");
       await launch();
       await waitForZenReady(client, options.timeoutMs);
       await ensureAdapter(client, 30_000, { installed: options.installed });
+      const startupInstall = options.installed
+        ? null
+        : await runAdapter(
+            client,
+            `return await api.install({ enabled: true });`
+          );
       const restoredSnapshot = await runAdapter(client, `return api.snapshot();`);
       const restored = zoneMap(restoredSnapshot, profileInfo.urls);
       const restoredProblems = expectZoneMap(restored, profileInfo.urls);
@@ -2301,12 +2499,63 @@ return {
         restoredProblems.length === 0,
         { expected, restored, problems: restoredProblems, windows: restoredSnapshot.windows.length }
       );
+      const persistedLock = await runScript(
+        client,
+        `const win = [...Services.wm.getEnumerator("navigator:browser")][0];
+const tab = win.gBrowser.addTab("about:blank", {
+  triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
+  inBackground: true,
+});
+win.gBrowser.pinTab(tab);
+const menu = win.document.getElementById("tabContextMenu");
+win.TabContextMenu.contextTab = tab;
+win.TabContextMenu.contextTabs = [tab];
+win.TabContextMenu.multiselected = false;
+win.TabContextMenu.updateContextMenu(menu);
+const item = win.document.getElementById("context_svalinn-protect");
+const result = {
+  locked: globalThis.Svalinn.locked(),
+  snapshotLocked: globalThis.Svalinn.snapshot().locked,
+  pref: Services.prefs.getBoolPref("svalinn.locked", false),
+  marker: win.document.documentElement.hasAttribute("svalinn-unlocked"),
+  checked: Boolean(item?.checked),
+  label: item?.getAttribute("label") ?? null,
+};
+win.gBrowser.removeTab(tab);
+return result;`,
+        { timeoutMs: 20_000 }
+      );
+      record(
+        "restart-lock-persisted",
+        unlockedBeforeRestart.status === "unlocked" &&
+          persistedLock.locked === false &&
+          persistedLock.snapshotLocked === false &&
+          persistedLock.pref === false &&
+          persistedLock.marker === true &&
+          persistedLock.checked === false &&
+          /unlocked/i.test(persistedLock.label ?? ""),
+        { before: unlockedBeforeRestart.status, ...persistedLock }
+      );
+      const relockState = await runAdapter(
+        client,
+        `const result = api.setLocked(true);
+         return {
+           ...result,
+           marker: win.document.documentElement.hasAttribute("svalinn-unlocked"),
+           pref: Services.prefs.getBoolPref("svalinn.locked", false),
+         };`
+      );
+      record(
+        "restart-relock-restores",
+        relockState.status === "locked" &&
+          relockState.locked === true &&
+          relockState.marker === false &&
+          relockState.pref === true,
+        relockState
+      );
       const restoredInstall = options.installed
         ? { status: "already-installed" }
-        : await runAdapter(
-            client,
-            `return await api.install({ enabled: true });`
-          );
+        : startupInstall;
       const afterRestartInstall = fingerprint(
         await runAdapter(client, `return api.snapshot();`)
       );

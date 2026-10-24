@@ -65,7 +65,7 @@ is removed automatically.
 | Create a Normal tab | Native controls; close X can be shown on hover. |
 | Create/pin a Pinned tab | No close X/overlay while locked. |
 | Create an Essential tab | No close X/overlay while locked. |
-| Context menu on Pinned/Essential | Native Close/Unpin/Remove entries hidden; matching Svalinn command visible. |
+| Context menu on Pinned/Essential | Native Close/Unpin/Remove entries hidden; matching Svalinn command and checked **Protect Pinned & Essentials** checkbox visible. |
 | Context menu on Normal | Native entries unchanged; Svalinn commands hidden. |
 
 ## 2. Close and intentional removal
@@ -81,7 +81,29 @@ is removed automatically.
 | Mixed multi-select close | Protected stays, normal closes | Protected stays | Normal closes |
 
 After an intentional command, protection must be active again immediately. There
-is no timer or global unlock.
+is no timer; protection changes only through the explicit global toggle below.
+
+## 2b. Global Locked / Unlocked
+
+Right-click any Pinned or Essential tab. One native checkbox item,
+**Protect Pinned & Essentials**, appears near the bottom of the menu.
+
+| Check | Expected |
+| --- | --- |
+| Baseline (fresh install) | Checkbox is checked = Locked; close/drag guards active. |
+| Right-click a Normal tab | The global checkbox and its separator are hidden. |
+| Uncheck the item | Label mentions "currently unlocked"; checked is cleared; Svalinn per-tab Unpin/Remove entries disappear; native Close/Unpin/Remove entries reappear. No tab moves, closes, or changes zone. |
+| Close / `Ctrl+W` / middle click a Pinned or Essential while unlocked | Native Zen behavior applies. |
+| Unpin or Remove from Essentials while unlocked | Native Zen action applies. |
+| Drag protected tab across categories/windows or out of the window while unlocked | Native Zen behavior applies. |
+| Re-check the item | Label/checked return to Locked; close, unpin, removal, drag and detach guards are active immediately. |
+| Toggle in one window, open the menu in another | The other window's checkbox shows the same state. |
+| Open a new window while unlocked | New window is unlocked too; its checkbox is unchecked. |
+| Restart Zen while unlocked | State is still Unlocked after restart; the checkbox remains unchecked. Re-check to relock. |
+| Repeat in expanded/compact sidebar and light/dark themes | One menu item, not crowded; unchecked state remains unmistakable. |
+
+The toggle never changes tab content, order, zone, or session data. Unlock is a
+protection state, not an instruction to close or move anything.
 
 ## 3. Drag and drop
 
@@ -173,6 +195,7 @@ Check the same matrix above with no `--marionette` or
 | --- | --- |
 | Startup without a debug port | Svalinn guards active; `about:config` shows `svalinn.status=installed`. |
 | Restart the same copied install/profile | Guards return; protected tabs restore. |
+| Unlock, then restart | State remains Unlocked; checkbox stays unchecked; native Zen actions remain. Re-lock to restore guards. |
 | `--disabled` install + restart | No guards; `svalinn.status=disabled`. |
 | Re-enable + restart | Guards return. |
 | `--command uninstall` | Bootloader/profile assets removed; native controls return. |
