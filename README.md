@@ -98,7 +98,9 @@ npm run zen:manual       # disposable profile for the manual checklist
 GitHub Actions runs the Node test/syntax checks automatically on every pull
 request and on `main` pushes (Node 22 and 24). Browser smoke and the manual
 gesture matrix are not run in CI because they require a real Zen binary and
-display. The expected manual outcomes and the remaining unautomated cases are
+display. `zen:manual` canonicalizes symlinked profile paths, refuses `~/.zen`
+before writing, and exits nonzero unless the adapter is installed with active
+guards. The expected manual outcomes and the remaining unautomated cases are
 documented in [`docs/manual-zen-checklist.md`](docs/manual-zen-checklist.md).
 
 

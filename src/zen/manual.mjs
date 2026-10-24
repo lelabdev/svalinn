@@ -16,6 +16,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MarionetteClient } from "./marionette.mjs";
 import { loadInjectionScript } from "./build.mjs";
+import { assertDisposableProfile } from "./profile.mjs";
+import {
+  profileMatchesSession,
+  validateManualSession,
+} from "./manual-lib.mjs";
 
 const PREFS = {
   "browser.shell.checkDefaultBrowser": false,
@@ -78,22 +83,9 @@ function parseArgs(argv) {
   return options;
 }
 
-function assertDisposable(profile) {
-  const resolved = path.resolve(profile);
-  const homeZen = path.resolve(path.join(os.homedir(), ".zen"));
-  if (
-    resolved === homeZen ||
-    resolved.startsWith(`${homeZen}${path.sep}`)
-  ) {
-    throw new Error(
-      `Refusing to use the daily Zen profile: ${resolved}`
-    );
-  }
-}
-
 async function prepareProfile(profile, port) {
   if (profile) {
-    assertDisposable(profile);
+    await assertDisposableProfile(profile);
     if (existsSync(profile)) {
       const entries = await fs.readdir(profile);
       if (entries.length) {
@@ -105,6 +97,10 @@ async function prepareProfile(profile, port) {
   } else {
     profile = await fs.mkdtemp(path.join(os.tmpdir(), "svalinn-manual-"));
   }
+
+  // Re-check after mkdir: a custom path may have been created through a
+  // symlinked ancestor and must still resolve outside ~/.zen.
+  await assertDisposableProfile(profile);
 
   await fs.writeFile(
     path.join(profile, "user.js"),
@@ -181,12 +177,17 @@ Follow docs/manual-zen-checklist.md for the gesture matrix.
       retryTimeoutMs: 60_000,
     });
     const session = await client.newSession();
-    if (path.resolve(session.capabilities["moz:profile"]) !== path.resolve(profile)) {
+    if (
+      !(await profileMatchesSession(
+        session.capabilities["moz:profile"],
+        profile
+      ))
+    ) {
       throw new Error("Marionette connected to the wrong profile; aborting");
     }
     verified = true;
     await client.setContext("chrome");
-    await client.execute(
+    const readyResult = await client.execute(
       `const done = arguments[arguments.length - 1];
 const win = [...Services.wm.getEnumerator("navigator:browser")][0];
 (async () => {
@@ -197,22 +198,49 @@ const win = [...Services.wm.getEnumerator("navigator:browser")][0];
 })().catch(error => done({ error: String(error) }));`,
       { async: true, sandbox: "svalinn-manual", newSandbox: true, timeoutMs: 60_000 }
     );
+    const ready = readyResult.value;
+    if (!ready || ready.error || ready.ready !== true) {
+      throw new Error(
+        `Zen startup failed: ${
+          ready?.error ?? "readiness was not reported"
+        }`
+      );
+    }
     await client.execute(await loadInjectionScript(), {
       async: false,
       sandbox: "svalinn-manual",
       newSandbox: false,
     });
-    const installed = await client.execute(
+    const installedResult = await client.execute(
       `const done = arguments[arguments.length - 1];
 globalThis.Svalinn.install({ enabled: true }).then(done, error => done({ error: String(error) }));`,
       { async: true, sandbox: "svalinn-manual", newSandbox: false, timeoutMs: 60_000 }
     );
+    const installed = installedResult.value;
+    const guardsResult = await client.execute(
+      `const snapshot = Svalinn.snapshot();
+return {
+  drop: Svalinn.hookedWindows(),
+  close: Svalinn.closeGuardedWindows(),
+  windows: snapshot.windows.map(window => ({
+    hooked: window.hooked,
+    closeHooked: window.closeHooked,
+  })),
+};`,
+      { async: false, sandbox: "svalinn-manual", newSandbox: false, timeoutMs: 60_000 }
+    );
+    const guards = guardsResult.value;
+
+    const assessment = validateManualSession({ ready, installed, guards });
+    if (!assessment.ok) {
+      throw new Error(assessment.error);
+    }
 
     console.log(`\nSvalinn manual session`);
-    console.log(`Zen: ${session.capabilities.browserVersion}`);
+    console.log(`Zen: ${assessment.version ?? session.capabilities.browserVersion}`);
     console.log(`Profile: ${profile}`);
-    console.log(`Adapter: ${installed.value?.status ?? "unknown"}`);
-    console.log(`Guards: drop=${installed.value?.windows ?? 0} window(s)`);
+    console.log(`Adapter: ${installed.status}`);
+    console.log(`Guards: drop=${guards.drop}, close=${guards.close} window(s)`);
     console.log(`\nFollow docs/manual-zen-checklist.md.`);
     console.log(`Close Zen or press Ctrl+C to end.\n`);
 

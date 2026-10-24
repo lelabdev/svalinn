@@ -38,11 +38,15 @@ npm run zen:manual -- --keep-profile
 
 The launcher:
 
-1. creates a temporary profile and copies `userChrome.css` into it;
-2. starts Zen with Marionette and `--no-remote`;
-3. verifies the connected `moz:profile`;
-4. injects the adapter and installs both close and drag guards;
-5. leaves Zen open for the checklist.
+1. resolves the real destination of `--profile` (including symlinked ancestors)
+   and rejects anything inside `~/.zen` before creating or writing files;
+2. creates a temporary profile and copies `userChrome.css` into it;
+3. starts Zen with Marionette and `--no-remote`;
+4. verifies the connected `moz:profile`;
+5. injects the adapter, requires `status === "installed"`, and requires at least
+   one attached window with both drop and close hooks active;
+6. prints the checklist only after those checks pass. Any startup, capability,
+   version, install, or hook failure exits nonzero with the reported reason.
 
 The adapter is session-only. Closing Zen removes the guards. The generated
 profile path is printed; delete it when finished, or omit `--keep-profile` so it
@@ -133,6 +137,8 @@ behavioral guard must still block close/unpin/removal.
 | --- | --- |
 | `Svalinn.uninstall()` (manual session) | Native close X/menus return; guards removed; tabs unchanged. |
 | Close Zen | Temporary profile can be deleted; daily profile untouched. |
+| Start with a symlinked profile alias into `~/.zen` | Refused before any file is created. |
+| Start with an unsupported/missing guard capability | Launcher exits nonzero; no checklist. |
 | Re-run `npm run zen:smoke` | PASS again. |
 
 ## Remaining cases not fully automated

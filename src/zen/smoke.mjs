@@ -19,6 +19,10 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MarionetteClient } from "./marionette.mjs";
 import { loadInjectionScript } from "./build.mjs";
+import {
+  assertDisposableProfile,
+  sameRealPath,
+} from "./profile.mjs";
 
 const SANDBOX = "svalinn-smoke";
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -126,24 +130,13 @@ function requireValue(argv, index, flag) {
   return value;
 }
 
-function assertDisposableProfile(profile) {
-  const resolved = path.resolve(profile);
-  const homeZen = path.join(os.homedir(), ".zen");
-  if (
-    resolved === path.resolve(homeZen) ||
-    resolved.startsWith(`${path.resolve(homeZen)}${path.sep}`)
-  ) {
-    throw new SmokeError(
-      `Refusing to use the daily Zen profile: ${resolved}. ` +
-        "The smoke test only accepts a disposable profile."
-    );
-  }
-}
-
-export function profilePreferences(port) {
+function profilePreferences(port) {
   const prefs = { ...PROFILE_PREFS, "marionette.port": port };
   return Object.entries(prefs)
-    .map(([name, value]) => `user_pref(${JSON.stringify(name)}, ${JSON.stringify(value)});`)
+    .map(
+      ([name, value]) =>
+        `user_pref(${JSON.stringify(name)}, ${JSON.stringify(value)});`
+    )
     .join("\n");
 }
 
@@ -153,10 +146,9 @@ export function profilePreferences(port) {
  * @param {object} options
  * @returns {Promise<{ profile: string, urls: Record<string, string>, created: boolean }>}
  */
-async function prepareProfile({ profile, port }) {
-  let created = false;
+async function prepareProfile({ profile, port }) {  let created = false;
   if (profile) {
-    assertDisposableProfile(profile);
+    await assertDisposableProfile(profile);
     if (existsSync(profile)) {
       const entries = await fs.readdir(profile);
       if (entries.length) {
@@ -185,6 +177,8 @@ async function prepareProfile({ profile, port }) {
     profile = await fs.mkdtemp(path.join(os.tmpdir(), "svalinn-zen-"));
     created = true;
   }
+
+  await assertDisposableProfile(profile);
 
   await fs.writeFile(
     path.join(profile, "user.js"),
@@ -299,8 +293,7 @@ async function connectAndVerify({ client, profile, port, child }) {
       "Marionette session did not report moz:profile; aborting before chrome access"
     );
   }
-  const sameProfile =
-    path.resolve(remoteProfile) === path.resolve(profile);
+  const sameProfile = await sameRealPath(remoteProfile, profile);
   if (!sameProfile) {
     throw new SmokeError(
       `Refusing to drive the wrong browser: connected profile ${remoteProfile} ` +
