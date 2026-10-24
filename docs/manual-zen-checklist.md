@@ -1,7 +1,8 @@
 # Manual Zen smoke-test checklist
 
 Use this checklist in a **disposable** Zen profile only. It complements the
-automated Node/VM tests and `npm run zen:smoke`; it is not a substitute for them.
+automated Node/VM tests, `npm run zen:smoke`, and
+`npm run zen:installed-smoke`; it is not a substitute for them.
 
 ## Prerequisites
 
@@ -25,10 +26,15 @@ npm test
 npm run check
 npm run zen:smoke
 node src/zen/smoke.mjs --headless
+npm run zen:installed-smoke
 ```
 
-Do not continue if any command fails. The smoke harness verifies `moz:profile`,
-never edits `/opt/zen-browser-bin`, and never writes to the daily profile.
+Do not continue if any command fails. The `zen:smoke` harness verifies
+`moz:profile`, never edits `/opt/zen-browser-bin`, and never writes to the daily
+profile. `zen:installed-smoke` uses a **copied** installation and a disposable
+profile, verifies one startup without Marionette, then runs the same checks
+through the persistently loaded adapter. See
+[`persistent-install.md`](persistent-install.md).
 
 ## Start a manual session
 
@@ -92,13 +98,18 @@ is no timer or global unlock.
 | Normal-tab drag | Native. |
 | Optional duplicate mode (`svalinn.protectedDragBehavior=duplicate`) | Four safe single-tab cross-category drops copy into target and keep source; unsafe contexts still block. |
 
-Optional duplicate-mode check (session-scoped in the Browser Console):
+Optional duplicate-mode check (session-scoped in the Browser Console for the
+manual/injected session):
 
 ```js
 Svalinn.setDragBehavior("duplicate")
 // perform the four transitions, then:
 Svalinn.setDragBehavior("block")
 ```
+
+For a persistent install, change the managed pref with the installer instead
+(`--drag-behavior duplicate`) and restart Zen; normal browsing does not expose a
+debug port or require the Browser Console.
 
 ## 4. Unload, restart and shutdown
 
@@ -141,6 +152,35 @@ behavioral guard must still block close/unpin/removal.
 | Start with an unsupported/missing guard capability | Launcher exits nonzero; no checklist. |
 | Re-run `npm run zen:smoke` | PASS again. |
 
+## 8. Persistent installed session
+
+Do this only after the copied-install suite passes and with a disposable profile
+first:
+
+```bash
+# Use a copied install and a new profile.
+node src/zen/install.mjs --profile /tmp/svalinn-installed-profile \
+  --install-root /tmp/opencode/zen-copy
+
+/tmp/opencode/zen-copy/zen-bin --profile /tmp/svalinn-installed-profile \
+  --no-remote --new-instance
+```
+
+Check the same matrix above with no `--marionette` or
+`--remote-allow-system-access` flag. Then:
+
+| Check | Expected |
+| --- | --- |
+| Startup without a debug port | Svalinn guards active; `about:config` shows `svalinn.status=installed`. |
+| Restart the same copied install/profile | Guards return; protected tabs restore. |
+| `--disabled` install + restart | No guards; `svalinn.status=disabled`. |
+| Re-enable + restart | Guards return. |
+| `--command uninstall` | Bootloader/profile assets removed; native controls return. |
+| `--command rollback` | Previous files/`user.js` restored. |
+
+The real daily profile must use `--confirm-daily`; test the same commands with
+the copied installation first.
+
 ## Remaining cases not fully automated
 
 - Physical OS drag-out for group labels, split views, and mixed selections: the
@@ -150,8 +190,10 @@ behavioral guard must still block close/unpin/removal.
   setup; checklist screenshots/computed styles are the evidence.
 - Real workspace switching mid-drag is modeled through source/target workspace
   checks and synthetic drops; a physical pointer gesture is still a manual case.
-- A persistent installation path is future work (#12); the current manual session
-  is disposable and adapter injection is session-scoped.
+- Persistent installation is automated against a copied install and disposable
+  profile; the final daily-profile install remains a deliberate manual step.
+- Sine interaction is not automated or supported; both use the autoconfig entry
+  point, so do not stack them without a separate review.
 
 ## CI
 

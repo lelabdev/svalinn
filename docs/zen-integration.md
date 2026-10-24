@@ -3,14 +3,24 @@
 Svalinn protects Pinned and Essential tabs inside Zen Browser. This document
 covers the privileged integration: how a script reaches Zen's browser chrome,
 how a disposable profile is used, how close/unpin removal is blocked, and how
-drag/drop preserves protected category membership (with optional duplication)
-without touching a daily profile or the Zen installation.
+drag/drop preserves protected category membership (with optional duplication).
+
+There are two execution paths:
+
+- **Persistent personal installation:** a minimal autoconfig bootloader in a
+  copied or real Zen installation loads a trusted profile loader at startup. No
+  debug port is used. See
+  [`persistent-install.md`](persistent-install.md).
+- **Test harness:** Marionette chrome context on a disposable profile injects
+  the same adapter. The installed smoke suite verifies that the persistent path
+  behaves identically.
 
 > Status: **close/unpin/remove protection, explicit per-tab unpin/removal,
-> lifecycle-safe close/menu hiding, and drag category protection are implemented
-> and smoke-tested.** Protected cross-category drags are blocked by default;
-> duplication is an opt-in mode. Normal tabs, safe same-category reordering/folder
-> moves, unloading, browsing, browser quit, and session restore stay native.
+> lifecycle-safe close/menu hiding, drag category protection, and persistent
+> personal installation are implemented and smoke-tested.** Protected
+> cross-category drags are blocked by default; duplication is an opt-in mode.
+> Normal tabs, safe same-category reordering/folder moves, unloading, browsing,
+> browser quit, and session restore stay native.
 
 ## Verified environment
 
@@ -33,19 +43,34 @@ Zen internals observed in this build:
 - Startup readiness via `gZenStartup.isReady` / `gZenStartup.promiseInitialized`
   and `SessionStore.promiseAllWindowsRestored`
 
-## Why Marionette chrome context
+## Execution mechanisms
 
-Several mechanisms can run code near Zen's tab UI. The requirement for issue #1
-is the least invasive mechanism that is still privileged enough to map real tabs
-and, later, intercept removal paths.
+Several mechanisms can run code near Zen's tab UI. Svalinn uses autoconfig for a
+persistent personal install and Marionette only for disposable tests.
 
-| Mechanism | Can inspect/deny tab removal? | Writes outside a disposable profile? |
-| --- | --- | --- |
-| Zen Mods | No — CSS only | No |
-| `userChrome.css` | No — presentation only | No |
-| userChromeJS / autoconfig (`config.js`) | Yes | **Yes — installation directory** |
-| WebExtension | Not reliably; privileged `experiments` need signing | Depends on install method |
-| **Marionette chrome context** | **Yes** | **No** |
+| Mechanism | Persistent? | Can intercept removal/drag? | Writes outside a disposable profile? |
+| --- | --- | --- | --- |
+| Zen Mods | Yes | No — CSS only | No |
+| `userChrome.css` | Yes | No — presentation only | No |
+| Profile unsigned WebExtension | Yes | No — sandboxed; privileged experiments need signing | Profile |
+| **Autoconfig bootloader + profile loader** | **Yes** | **Yes** | **Two files in the installation root** |
+| **Marionette chrome context** | No | **Yes** | **No** |
+
+### Persistent path
+
+The installer writes `svalinn.cfg` and
+`defaults/pref/svalinn-autoconfig.js` into the Zen installation root. The
+autoconfig file registers a profile-local `chrome.manifest` and imports
+`chrome://svalinn/content/loader.sys.mjs`. The loader waits for browser startup
+and installs the same adapter used by the tests. Install/update/backup/rollback/
+uninstall and status are handled by `src/zen/install.mjs`.
+
+This path has no Marionette flag, no Remote Agent, and no open debugging port
+during normal browsing. It is a personal local installation, not a signed
+extension or a public add-on. See
+[`persistent-install.md`](persistent-install.md) for commands and safety.
+
+### Test path
 
 Marionette is built into Gecko and is enabled per process with `--marionette`.
 Chrome-context scripts need Gecko's explicit system-access flag:
@@ -56,17 +81,17 @@ zen-browser --profile <test-profile> --marionette -remote-allow-system-access --
 
 The smoke harness starts Zen with those flags, verifies the Marionette session's
 `moz:profile` matches the disposable profile, and only then switches to chrome
-context. Nothing is patched in `/opt/zen-browser-bin`, no files are added to
-`~/.zen`, and nothing persists after the process exits.
+context. `zen:smoke` never patches `/opt/zen-browser-bin`. The installed smoke
+suite uses a **copied** installation and starts it once without Marionette before
+running the same checks.
 
-### Alternatives rejected
+### Why not a normal WebExtension?
 
-- **Installation-directory autoconfig:** works, but violates the "no patches to
-  `/opt/zen-browser-bin`" acceptance criterion and makes upgrades harder.
-- **Unsigned privileged WebExtension:** cannot reliably intercept every close,
-  unpin, keyboard, and drag path; signing and research APIs are not suitable for
-  a disposable test.
-- **Manual Browser Toolbox:** repeatable only by hand, not scriptable for CI.
+An unsigned sideloaded extension using `experiment_apis` was tested in a
+disposable Zen 1.23.4b profile. The extension loads, but Gecko marks it
+unprivileged; experiment APIs require a signed/builtin/privileged add-on or a
+temporary add-on. Temporary add-ons do not survive restart. Standard extensions
+cannot reliably intercept all close, unpin, context-menu, and drag paths.
 
 ## Run the smoke test
 
@@ -74,7 +99,7 @@ context. Nothing is patched in `/opt/zen-browser-bin`, no files are added to
 npm run zen:smoke
 ```
 
-What happens:
+This is the adapter-level, disposable test path:
 
 1. A profile is created with `mkdtemp()` under the system temp directory, with
    `userChrome.css` copied into its `chrome/` directory.
@@ -111,6 +136,22 @@ What happens:
     their zones intact, with both guards reattached.
 20. Zen shuts down, and the temporary profile is removed.
 
+The persistent installed suite uses the same checks after installing the real
+bootloader and profile loader in a copied installation:
+
+```bash
+npm run zen:installed-smoke                 # headless, temporary copy
+npm run zen:installed-smoke -- --headed     # visible window
+node src/zen/installed-smoke.mjs --install-root /tmp/opencode/zen-copy
+```
+
+It starts Zen once without `--marionette` and requires
+`svalinn.status=installed`, `svalinn.loaderVersion=0.1.0`, and at least one
+guarded window, then runs the full suite through the loaded adapter. It also
+reinstalls with `svalinn.enabled=false`, starts once more without Marionette, and
+requires `svalinn.status=disabled` with zero guarded windows. The installation
+copy keeps `/opt` and `~/.zen` untouched.
+
 Useful flags:
 
 ```bash
@@ -130,6 +171,10 @@ node src/zen/smoke.mjs --zen /usr/bin/zen-browser --port 2828
 # Run headless, or skip the restart phase
 node src/zen/smoke.mjs --headless
 node src/zen/smoke.mjs --skip-restart
+
+# Test an installed copy; skip the no-Marionette preflight only when needed
+node src/zen/installed-smoke.mjs --install-root /tmp/opencode/zen-copy \
+  --skip-preflight
 ```
 
 The profile is rejected if it is `~/.zen` or inside it. If the requested
@@ -351,26 +396,43 @@ How the guard works:
    proof of restoration. Pending copies are cancelled on uninstall/window detach,
    and failures remove the copy while keeping the source.
 
-## Install and uninstall model
+## Installation and lifecycle model
 
-There is intentionally no persistent installation for this phase.
+The persistent personal install has two layers:
 
-- **Install:** run the smoke command. The adapter is evaluated in the running
-  browser's chrome context and attaches a non-enumerable `__svalinn` marker to
-  each browser window. `Svalinn.install({ enabled: true })` waits for Zen
-  startup, validates capabilities, then attaches every window, installs the close
-  and drop guards, and observes new windows.
-- **Uninstall:** `Svalinn.uninstall()` restores the native close, unpin,
-  Essential-removal, and drop entry points, removes the marker, and removes the
-  window observer. Quitting Zen removes everything else; the disposable profile
-  can be deleted. There is no prior state to restore in Zen's installation
-  directory or daily profile.
+1. **Bootloader:** `svalinn.cfg` and `defaults/pref/svalinn-autoconfig.js` in the
+   Zen installation root register the profile chrome manifest and import the
+   loader at startup.
+2. **Loader:** `chrome://svalinn/content/loader.sys.mjs` waits for browser
+   startup, loads the unchanged adapter into a chrome host window, and calls
+   `Svalinn.install({ enabled: true, waitForStartup: true })`. It records
+   `svalinn.status`, `svalinn.lastError`, `svalinn.loaderVersion`, and
+   `svalinn.guardWindows` in prefs.
+3. **Presentation pref:** the managed `user.js` block enables
+   `toolkit.legacyUserProfileCustomizations.stylesheets`, and the installer adds
+   a marker-delimited Svalinn block to `chrome/userChrome.css` so protected tabs
+   hide their close controls. Existing user CSS is preserved.
 
-The adapter is disabled by default (`svalinn.enabled` defaults to `false`) and
-the smoke test passes `enabled: true` explicitly. A disabled call returns
-`{ status: "disabled" }` and attaches nothing. Uninstall/disable restores native
-behavior and is a development lifecycle control, not the intentional-removal UX;
-the per-tab context commands cover that.
+The adapter remains the same code used by the tests. It attaches a
+non-enumerable `__svalinn` marker to each browser window, installs the close and
+drop guards, and observes new windows.
+
+- **Enable/disable:** the managed `svalinn.enabled` pref (default `true` for a
+  personal install). Disable with `--disabled` and restart; the loader marks
+  itself disabled and attaches nothing.
+- **Update:** the installer backs up and replaces the bootloader/profile assets.
+- **Rollback:** restores the latest or selected backup, including the prior
+  `user.js` and installation files.
+- **Uninstall:** removes the bootloader, profile assets, and managed `user.js`
+  block. It does not touch tabs/session data and keeps the backup directory.
+- **Unsupported version/fallback:** the adapter's capability probe must pass. If
+  it fails, `Svalinn.install()` returns `unsupported`, nothing is attached, and
+  the loader writes the status/error prefs. CSS has no active marker.
+- **Normal shutdown/restart:** the loader starts again from autoconfig; the
+  installed smoke suite verifies session restore and both guards reattaching.
+
+The full command reference, backup layout, sudo ownership handling, and
+troubleshooting live in [`persistent-install.md`](persistent-install.md).
 
 ### In-browser API
 
@@ -403,22 +465,31 @@ newer build.
 
 ## Security implications
 
-Chrome-context execution with `-remote-allow-system-access` is equivalent to
-running arbitrary code with the browser's full privileges: it can read cookies,
-credentials, session data, and every profile file. Treat it as a temporary
-debugging backdoor.
+The persistent loader is privileged code that runs at every Zen start. Treat the
+installation root and profile chrome files as trusted code:
 
-Rules for this repository:
+- Review installer changes and keep backups.
+- Do not install while Zen is running.
+- Do not run Zen as root.
+- Do not use `--force` to stack autoconfig loaders without understanding which
+  file wins.
+- Keep `svalinn.enabled` disabled when you do not need protection; the profile
+  files can remain installed but inert.
+- The normal browsing path does **not** open a Marionette/Remote Agent port.
+- The test path still uses `--marionette -remote-allow-system-access`; it is
+  equivalent to arbitrary code execution with the browser's full privileges.
+  Use only disposable profiles and stop the process after testing.
 
-- Never launch it with `~/.zen` or any profile containing real data.
+Rules for the test harness:
+
+- Never launch `zen:smoke` with `~/.zen` or a profile containing real data.
 - Never keep a Zen process running with `--marionette
   -remote-allow-system-access` after testing.
 - Never expose the Marionette port beyond loopback.
-- Keep the harness's profile verification; it is what prevents accidentally
-  driving the daily browser when the port is already in use.
-- Do not add auto-start hooks, systemd units, or profile-level injection in this
-  phase.
-- The smoke pages are local `file://` documents; no network access is needed.
+- Keep the harness's `moz:profile` verification; it prevents driving the wrong
+  browser when the port is already in use.
+- The installed smoke suite uses a copied installation and does not touch
+  `/opt/zen-browser-bin` or `~/.zen`.
 
 If the harness is interrupted, stop the spawned browser and delete the
 disposable profile:
@@ -429,8 +500,10 @@ pkill -f 'zen-browser.*svalinn-zen-'
 rm -rf /tmp/svalinn-zen-*
 ```
 
-No rollback is required in Zen itself because neither the installation directory
-nor the daily profile was modified.
+No rollback is required for the test harness because neither the installation
+directory nor the daily profile was modified. The persistent installer has its
+own backups and rollback commands; see
+[`persistent-install.md`](persistent-install.md).
 
 ## Tests
 
@@ -438,6 +511,7 @@ nor the daily profile was modified.
 npm test
 npm run check
 npm run zen:smoke
+npm run zen:installed-smoke
 ```
 
 `npm test` covers:
@@ -463,6 +537,9 @@ npm run zen:smoke
   timeout, unknown and throwing targets, planning errors, uninstall cancellation,
   duplication failures, Essential rejection, and no source-tab mutation
 - injection bundling, CSS marker scoping, and Marionette framing/error handling
+- installer `user.js` merge/remove idempotence, install-root validation,
+  autoconfig conflict detection, backup/install/status/uninstall on temporary
+  fixtures, version refusal/override, and rollback restoration
 
 ### CI and manual coverage
 
@@ -506,6 +583,13 @@ dragging, deletion-safe failure paths, an unknown-target negative control,
 delayed-restore cancellation by uninstall, reinstall after cancellation,
 multi-window attachment, restart/session restore, and shutdown. It is not part of
 `npm test` because it launches a browser.
+
+`npm run zen:installed-smoke` is the persistent-install integration check. It
+copies the Zen installation, installs the autoconfig bootloader and profile
+loader into temporary locations, verifies startup **without Marionette**, then
+runs the same full suite through the loaded adapter, including restart and
+session restore. It never touches `/opt/zen-browser-bin` or `~/.zen` unless an
+explicit `--install-root` points there.
 
 A separate **real-input UI matrix** was run against a windowed Zen 1.23.4b test
 profile using xdotool (X11/XWayland), not direct API calls:
@@ -595,17 +679,47 @@ profile using xdotool (X11/XWayland), not direct API calls:
   unloading, restart/session restore, workspaces/containers, multi-window,
   themes/layouts, and rollback.
 - **Remaining unautomated cases.** The checklist explicitly lists physical OS
-  drag-out for group/split/mixed sources, visual theme/Zen Mods combinations,
-  workspace switching mid-drag, and persistent installation as not fully
-  automated.
+  drag-out for group/split/mixed sources, visual theme/Zen Mods combinations, and
+  workspace switching mid-drag as not fully automated. Persistent installation is
+  covered by `zen:installed-smoke` and the installer tests added for issue #12.
 - **Version prerequisites.** Zen 1.23.4b and Node 22+ are stated in the checklist
   and integration documentation; newer Zen versions fail capability/version
   checks until revalidated.
 
+## Issue #12 acceptance
+
+- **Persistent personal install.** Minimal autoconfig bootloader plus profile
+  loader; no public extension/Sine publication. Full install/update/backup/
+  rollback/uninstall/status commands are documented in
+  [`persistent-install.md`](persistent-install.md).
+- **No debugging port in normal browsing.** The loader starts from autoconfig;
+  `zen:installed-smoke` verifies a successful startup without `--marionette`
+  before running the full suite.
+- **Restart and session restore.** Installed smoke restarts the same profile and
+  verifies tab zones, guards, and the loaded adapter after restart.
+- **Enable/disable and fallback.** `--disabled` writes the managed pref and
+  `--enabled` restores it; changes apply on restart. The adapter fails closed
+  (`unsupported`/`not-ready`) and attaches no hooks if Zen internals change.
+- **Non-destructive install.** Backups are created before writes; rollback
+  restores prior files/`user.js`; uninstall leaves browsing data alone; conflicting
+  autoconfig loaders are refused unless explicitly forced.
+- **Version guard.** `application.ini` must be a verified 1.23.x line before
+  installation unless `--allow-unverified-version` is explicitly used.
+- **Test isolation.** Installer tests use temporary fake Zen roots/profiles.
+  Installed smoke copies the installation and uses a disposable profile; real
+  `/opt` and `~/.zen` are not touched.
+- **Scope.** Public release/distribution remains out of scope (#7); Sine
+  compatibility is not claimed.
+
 ## Known limitations
 
-- The adapter is a development/smoke harness, not a user-facing installation
-  method. A future issue must choose and document a supported deployment path.
+- The persistent personal installation is a local autoconfig bootstrap, not a
+  signed/public extension. Zen updates can replace installation-root files, so
+  reinstall/update after a browser update. Public distribution and Sine integration
+  remain separate decisions.
+- This is not a hardened security boundary against malicious code already running
+  with chrome privileges; it prevents accidental user gestures, not a compromised
+  browser.
 - Intentional unpin/Remove-from-Essentials commands are single-tab only. A mixed
   multi-selection hides them; `Unpin Selected Tabs` is also hidden when the
   selection contains a protected tab, avoiding partial native failure.
