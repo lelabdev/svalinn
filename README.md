@@ -24,7 +24,7 @@ Right-click any Pinned or Essential tab and use the single global **Protect Pinn
 
 The implementation covers multi-selection, folders, workspaces, containers, split views and cross-window cases by either preserving safe native behavior or blocking unsupported destructive transitions. Some physical drag gestures and UI variations still require manual verification; see [the real-Zen checklist](docs/manual-zen-checklist.md).
 
-**Important:** Svalinn is currently a **privileged browser customization**, **not** a regular Firefox WebExtension, a CSS-only Zen Mod, or an official Zen feature. It installs a small autoconfig bootloader in the Zen installation directory plus a profile-local loader. Normal browsing requires **no Marionette or debugging port**. It is not yet distributed as a tagged installable release.
+**Important:** Svalinn is currently a **privileged browser customization**, **not** a regular Firefox WebExtension, a CSS-only Zen Mod, or an official Zen feature. It installs a small autoconfig bootloader in the Zen installation directory plus a profile-local loader. Normal browsing requires **no Marionette or debugging port**. It is not distributed as a tagged installable release, and no such release is planned.
 
 ## Try it on a disposable Zen copy
 
@@ -98,8 +98,10 @@ GitHub Actions runs the Node checks on Node 22 and 24. Browser smoke tests requi
 
 The working protection, personal installation and global Locked / Unlocked toggle are complete. Remaining improvements are tracked separately:
 
-1. [#21 — Native Zen contribution](https://github.com/lelabdev/svalinn/issues/21): investigate a focused upstream PR against `zen-browser/desktop`. No upstream acceptance or integration is claimed. See the [native contribution research plan](docs/upstream-native-plan.md) for the mapped call sites, proposed prefs/defaults and test plan.
-2. [#7 — Optional standalone release](https://github.com/lelabdev/svalinn/issues/7): decide whether a downloadable package is useful alongside a native contribution. [#8 — Logo](https://github.com/lelabdev/svalinn/issues/8) is deferred branding, not a release blocker.
+1. [#21 — Native Zen contribution](https://github.com/lelabdev/svalinn/issues/21): coordinate a focused upstream PR against `zen-browser/desktop`. No upstream acceptance or integration is claimed. See the [native contribution research and handoff plan](docs/upstream-native-plan.md) for the mapped call sites, parity choices, proposed prefs/defaults and test plan.
+2. [#8 — Logo](https://github.com/lelabdev/svalinn/issues/8) is deferred branding, not a release blocker.
+
+No separately packaged release, extension, tagged download or maintained browser fork is planned; [#7](https://github.com/lelabdev/svalinn/issues/7) is closed as `not planned`. The MIT source installation remains the prototype and fallback while native integration is explored.
 
 A related community request is [Zen Browser discussion #7050 — Idea on Pinned Tabs Functionality](https://github.com/zen-browser/desktop/discussions/7050).
 

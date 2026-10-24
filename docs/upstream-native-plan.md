@@ -1,35 +1,43 @@
 # Native Zen contribution plan
 
-Research deliverable for issue #21. This document maps Svalinn's current
-behavior onto `zen-browser/desktop`, proposes a minimal native design, and
-records what is still unknown. It is **not** a claim that Zen maintainers have
-accepted or prioritized the feature.
+Handoff deliverable for issue #21. This document maps Svalinn's current behavior
+onto `zen-browser/desktop`, fixes the proposed native design and test boundary,
+and records what is still unknown. It is **not** a claim that Zen maintainers
+have accepted, prioritized or integrated the feature.
 
 - Upstream baseline: `zen-browser/desktop@dev`,
   commit [`2ad1945`](https://github.com/zen-browser/desktop/commit/2ad194525da74d7f00609a424d93a3c7db430d21)
   (2026-10-24).
+- Contribution fork:
+  [`lelabdev/zen-browser-desktop`](https://github.com/lelabdev/zen-browser-desktop)
+  (verified fork; its `dev` matches upstream `2ad1945`, write access is on the
+  fork only).
+- Current Svalinn state: protection and the Locked/Unlocked toggle are merged
+  (#20/PR #23); the research plan (#26) and README licensing clarification
+  (#25/PR #27) are merged; separately packaged releases are cancelled (#7
+  closed `not planned`).
 - License: Zen is MPL-2.0; Svalinn is MIT. Native files must carry MPL-2.0
   headers, and ported policy logic should be rewritten in MPL-2.0 style with
   attribution rather than copied wholesale.
-- This research was read-only against upstream and used GitHub APIs only. No
-  Zen build was run, and no local browser profile or daily installation was
-  touched. A local build requires a separate explicit request.
+- This research used read-only GitHub APIs. No Zen build was run, and no local
+  browser profile or daily installation was touched. A local build requires a
+  separate explicit request.
 
 ## Decisions at a glance
 
-| Question | Recommendation |
+| Question | Decision / proposal |
 | --- | --- |
 | Upstream branch | `dev`; feature branches are normally based on `dev`/`twilight` |
-| Fork required | Yes for a PR; the current GitHub account has read-only upstream access |
+| Fork | Ready: `lelabdev/zen-browser-desktop`; upstream itself remains read-only |
 | Default for existing users | **Opt-in / off by default** (`zen.pinned-tab-manager.protect-pinned-essentials=false`) |
 | Protection states | Exactly two when enabled: **Locked** (default) and **Unlocked** |
 | Persistence | `zen.pinned-tab-manager.protected-tabs-locked` (default `true`) |
 | UI | One native checkbox in the Pinned/Essential tab context menu |
 | Feature enable UI | Small checkbox in **Settings → Pinned Tabs**; maintainers decide |
 | Copy-on-drop | **Not** in the first native PR; revisit separately |
-| Standalone release | Keep the current MIT/source installation; defer #7 until the native outcome |
+| Standalone release | **Cancelled**: no extension package, tagged download or maintained browser fork; MIT source remains the prototype/fallback |
 | First native PR | Feature gate + prefs + menu checkbox + close/unpin/removal/drag guards + L10n + tests |
-| Maintainer approval | **Not yet established**; see community section |
+| Maintainer approval | **Not established**; only a historical “good first issue” signal, not approval |
 
 ## Community and maintainer status
 
@@ -37,12 +45,21 @@ Existing upstream requests were found, but no maintainer has committed to the
 feature or to reviewing a native PR:
 
 - [Discussion #7050 — Idea on Pinned Tabs Functionality](https://github.com/zen-browser/desktop/discussions/7050)
-  (2025-03): asks for accidental-close protection. Two community replies; no
-  maintainer response.
+  (2025-03): asks for accidental-close protection. The project owner posted a
+  single Svalinn introduction and native-contribution note on 2026-10-24. No
+  maintainer has responded as of that date.
 - [Discussion #13833 — Lock/Protect Pinned Tabs from Accidental Unpinning &
   Closing](https://github.com/zen-browser/desktop/discussions/13833)
   (2026-05): closely matches Svalinn. One community workaround reply
   (`Ctrl+Shift+T`); no maintainer response.
+- [Zen issue #11278 — Tabs and essentials easy to accidentally drag
+  off](https://github.com/zen-browser/desktop/issues/11278): maintainer
+  `mr-cheffy` said on 2026-03-12 that they would add “Lock Essentials” as a
+  **good first issue**, and the repository applied that label. The issue was
+  later closed by the reporter after the original drag problem appeared
+  resolved (Hyprland sensitivity), not because the feature was implemented.
+  This is a positive signal for a focused contribution, **not** approval of
+  Svalinn's full scope, defaults or UX.
 - [Discussion #2829 — Parity with Arc on Pinned
   Tab](https://github.com/zen-browser/desktop/discussions/2829): broader pinned-tab
   requests; no maintainer commitment to protection.
@@ -50,15 +67,14 @@ feature or to reviewing a native PR:
   repository search.
 
 The authenticated GitHub account has `pull:true`, `push:false`,
-`triage:false` on `zen-browser/desktop`, so **no Discussion comment was posted
-in this research and no maintainer feedback can be claimed**. Before writing
-native code, a human with permission should post a short comment in #13833 (or
-open a focused feature request) linking the working MIT-licensed standalone
-project and asking whether maintainers want a native PR, with which default and
-scope.
+`triage:false` on `zen-browser/desktop`; write access exists only on the
+contribution fork. The project owner already made the single appropriate
+community reply, so no repetitive announcement should be posted. A maintainer
+go/no-go and preferred scope/default are still required before implementation.
 
-**Status:** maintainer receptiveness remains unverified. This is the main open
-acceptance criterion for #21.
+**Status:** maintainer acceptance remains unverified. Absence of a maintainer
+response is explicitly documented here; the historical “good first issue”
+signal is not treated as approval.
 
 ## Native behavior specification
 
@@ -98,6 +114,38 @@ When the feature pref is enabled:
 - Native code is not a security boundary: extensions or privileged programmatic
   removals are out of scope, matching the standalone project's documented model.
 - Feature disabled means no menu item, no guards, and no pref side effects.
+
+## Finalized first-PR parity choices
+
+These choices close the open implementation questions for the first PR unless a
+maintainer directs otherwise:
+
+- **Ctrl+W / close shortcut while Locked:** suppress the destructive close and
+  leave the tab untouched. Do not silently fall back to unload/reset when the
+  user configured the shortcut as `close`; unload/reset/switch remain available
+  through the existing native options and menu. This avoids surprising state
+  changes while Locked.
+- **Unpin / Remove from Essentials while Locked:** block the action and hide the
+  corresponding native menu entries. The first native PR has no per-tab
+  Svalinn-only removal commands; users Unlock, use native Zen actions, then
+  Lock again. This keeps native menu ownership and avoids a second UX.
+- **Guard boundary:** prefer small guards in the already-patched
+  `Tabbrowser.sys.mjs` methods plus `ZenPinnedTabManager.removeEssentials`. This
+  covers menu, shortcut, group and multi-selection paths without per-window
+  monkey-patching. If maintainers reject core-method guards, fall back to
+  guarding every Zen-owned call site and document that programmatic removal is
+  outside the guarantee.
+- **Feature gate:** one Settings checkbox bound to
+  `protect-pinned-essentials`; the context-menu checkbox appears only when the
+  feature is enabled. The Locked/Unlocked state remains the only runtime
+  protection state. Maintainers may change the default or defer the Settings
+  UI to `about:config`.
+- **Copy-on-drop:** excluded from the first PR. Locked blocks cross-zone moves
+  and preserves the source; Unlocked uses native move behavior. A later PR can
+  propose duplication separately.
+- **Required native suites:** `pinned`, `tabs`, `folders`, `split_view`,
+  `container_essentials`, `window_drag`, `window_sync`, plus `npm run lint`.
+  Maintainers may require the full `npm test` suite or additional platforms.
 
 ## Preference design
 
@@ -194,7 +242,7 @@ light/dark themes manually because Zen's close-button geometry differs by mode.
 | same | `removeEssentials` | Refuse the whole mutation (including multi-selection) while Locked |
 | same | `moveToAnotherTabContainerIfNecessary` | Refuse protected category/window/workspace/container changes before mutating; keep same-zone reorder native |
 | `src/zen/drag-and-drop/ZenDragAndDrop.js` | `handle_drop`, `handle_drop_transition`, `handle_dragend` | Integrate the policy check for drop/detach; clear visuals after a blocked drop; do not create windows for protected out-of-window drags |
-| `src/browser/components/tabbrowser/content/drag-and-drop.js` (Zen patch) | `_handle_drop` call to `moveToAnotherTabContainerIfNecessary` | Consult the protection policy before the native move/adopt path |
+| `src/browser/components/tabbrowser/content/drag-and-drop-js.patch` | `_handle_drop` call to `moveToAnotherTabContainerIfNecessary` | Consult the protection policy before the native move/adopt path |
 | `src/browser/components/tabbrowser/Tabbrowser-sys-mjs.patch` | `removeTab`, `removeTabs`, `removeCurrentTab`, `unpinTab`, `removeTabGroup` | Central guards are the preferred native boundary; allow shutdown/session/internal authorized paths. Confirm maintainer preference before patching this deeply |
 | `src/browser/components/tabbrowser/content/tab-context-menu-js.patch` | menu update call | Already calls `updatePinnedTabContextMenu`; verify ordering covers the checkbox before display |
 | `src/zen/tabs/zen-tabs/vertical-tabs.css` | pinned/essential close rules | Add unlocked overrides; preserve native locked hiding |
@@ -302,11 +350,12 @@ touch the user's daily Zen installation or profile.
 
 ## Standalone release decision
 
-Defer #7 (downloadable standalone release). The current MIT-licensed source
-installation remains the supported fallback while the native PR is explored.
-Producing a packaged release now would add maintenance and distribution work
-before maintainer feedback and would not help the upstream proposal. Revisit #7
-only if the native path is rejected, stalls, or users need a simpler install.
+**No separate packaged release will be produced.** Issue #7 is closed
+`not planned` at the project owner's direction: there will be no extension
+package, tagged standalone download or maintained browser fork. The MIT-licensed
+source installation remains available as the working prototype and fallback
+until a native feature is accepted and shipped. This decision does not block the
+native contribution; it removes packaging work from the critical path.
 
 ## Attribution and licensing
 
@@ -319,37 +368,92 @@ only if the native path is rejected, stalls, or users need a simpler install.
 - Localization contributions should follow Zen's Fluent and translation
   process; English source strings plus accesskeys are enough for the first PR.
 
+## Implementation handoff
+
+This is the boundary for the next work item; it does **not** claim that native
+code or an upstream PR exists.
+
+- **Source:** fork [`lelabdev/zen-browser-desktop`](https://github.com/lelabdev/zen-browser-desktop),
+  default `dev` at upstream `2ad1945`. Refresh from
+  `zen-browser/desktop@dev` before branching.
+- **Branch:** create one feature branch from `dev` once maintainers give
+  go/no-go. Do not reuse a Svalinn branch or open a PR from an unrelated fork.
+- **Out of scope:** Svalinn's autoconfig installer/loader, standalone packaging,
+  copy-on-drop, branding, and any browser-fork distribution.
+
+### Order of work
+
+1. Add the two prefs and the Settings gate; verify defaults and pref persistence.
+2. Add the native policy helper and the Locked/Unlocked manager state, pref
+   observer, per-window root marker and rollback behavior.
+3. Add the Pinned/Essential context-menu checkbox, Fluent strings, and
+   locked-state hiding of native destructive entries.
+4. Add close/middle-click/unpin/remove guards at the agreed boundary.
+5. Add drag/drop and detach guards, preserving same-category reorder and native
+   unload/restart/shutdown.
+6. Add the CSS unlocked overrides and the browser test matrix; run lint and the
+   required suites in a separate checkout with a disposable profile.
+
+### Definition of done for the first PR
+
+- Feature disabled → native behavior unchanged, with no menu item and no guards.
+- Feature enabled → Locked by default; exactly two states; pref persists across
+  restart and new windows; failed transitions do not report success or leave a
+  partial unlock.
+- Locked blocks close/shortcut/middle-click/unpin/removal/unsafe drag/detach and
+  preserves the source tab; same-category reorder, unload, session restore and
+  shutdown remain native.
+- Unlocked delegates to native Zen and shows native destructive entries.
+- MPL-2.0 headers, Fluent strings, attribution for any MIT-derived logic, and
+  green required native tests.
+- Upstream PR is focused, references the community request without claiming
+  endorsement, and does not include the standalone installer.
+
+### Handoff status
+
+The fork is ready and the plan is complete, but **no feature branch, native
+code or upstream PR has been created**. Starting implementation requires
+maintainer feedback or an explicit owner decision to proceed without it, plus a
+separate authorized build/test environment. The current environment must not be
+used for a native build or daily-profile testing.
+
 ## Open questions for maintainers
+
+The handoff uses the recommendations below unless maintainers decide otherwise:
 
 1. Is a native protection feature welcome at all, and is `dev` the right target?
 2. Is opt-in/off-by-default acceptable, or should it be on by default?
 3. Settings checkbox vs. `about:config`-only gate for the first PR?
-4. Central `Tabbrowser` guards vs. guarding only Zen-owned call sites?
+4. Central `Tabbrowser` guards vs. guarding only Zen-owned call sites? Proposed:
+   central guards with a call-site fallback.
 5. Should the close shortcut in Locked mode be a no-op, or fall back to Zen's
-   configured unload/reset behavior?
+   configured unload/reset behavior? Proposed: no-op for destructive close.
 6. Is copy-on-drop wanted later, or should native Zen keep block-only behavior?
-7. Which test suites and platforms are required before review?
+   Proposed: block-only first, duplication later.
+7. Which test suites and platforms are required before review? Proposed list is
+   in the parity choices and test plan.
 
 ## Acceptance mapping for #21
 
 | Criterion | Status |
 | --- | --- |
-| Verify upstream requests and maintainer welcome | Requests found; **maintainer welcome unverified**; no upstream comment posted (read-only account) |
-| Establish target branch, guidelines, fork need, source candidates | **Done**: `dev`, contribution/build docs, fork required, components mapped |
-| Map native call sites and minimal pref/UI/close/demotion/drop design | **Done in this document**, subject to maintainer review of central guards |
-| Decide safe default, copy-on-drop scope, compatibility, record feedback | Default/off + deferred copy-on-drop decided; **feedback absent** |
+| Verify upstream requests and maintainer welcome | Requests and the historical “good first issue” signal documented; **no maintainer response to the Svalinn proposal**; absence explicitly recorded |
+| Establish target branch, guidelines, fork need, source candidates | **Done**: `dev`, contribution/build docs, fork ready, components mapped |
+| Map native call sites and minimal pref/UI/close/demotion/drop design | **Done**, with central-guard recommendation and fallback |
+| Decide safe default, copy-on-drop scope, compatibility, record feedback | Opt-in/off default, copy-on-drop deferred, compatibility documented, feedback absence recorded |
 | Practical build/test plan and file-level implementation brief | **Done**; build not executed by design |
-| Decide separate downloadable release | **Deferred**; not a blocker |
-| Confirm next native implementation PR boundary | First PR boundary proposed above; maintainer go/no-go still required |
+| Decide separate downloadable release | **Done**: cancelled `not planned`; no packaging |
+| Confirm next native implementation PR boundary | **Done in the handoff above**; starting it still requires maintainer go/no-go or an explicit owner decision |
 
 ## Next actions
 
-1. A human with upstream write access posts a concise proposal in Discussion
-   #13833 (or a feature request), linking Svalinn and asking for go/no-go and
-   preferred scope/default.
-2. If welcomed, fork `zen-browser/desktop`, branch from `dev`, and implement the
-   first-PR boundary in this document.
-3. Run the listed native suites and lint in a separate checkout with a
+1. Wait for a maintainer response in Discussion #7050; do not post repetitive
+   announcements. If none arrives, the owner decides whether to ask once in the
+   most relevant discussion or proceed with a focused PR at their own risk.
+2. If proceeding, refresh the contribution fork from `dev`, create one feature
+   branch and implement the order of work in the handoff.
+3. Run the native suites and lint in a separate authorized checkout with a
    disposable profile; report results in the upstream PR.
-4. Keep the standalone Svalinn working and documented until the feature is
-   actually accepted and shipped.
+4. Keep the MIT Svalinn source working as the prototype/fallback. Do not claim
+   native integration until Zen accepts and ships it, and do not close #21 until
+   the resulting upstream PR is tracked.
