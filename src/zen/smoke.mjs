@@ -3,9 +3,10 @@
  * Svalinn smoke test for Zen Browser.
  *
  * Launches Zen with a disposable profile, injects the read-only adapter through
- * Marionette's chrome context, creates normal/Pinned/Essential tabs, verifies the
- * mapping, checks install/uninstall/disabled behaviour, restarts and verifies
- * session restore, then shuts down and removes the profile.
+ * Marionette's chrome context (or uses a persistently installed loader with
+ * `--installed`), creates normal/Pinned/Essential tabs, verifies the mapping,
+ * checks install/uninstall/disabled behaviour, restarts and verifies session
+ * restore, then shuts down and removes the profile.
  *
  * Usage: npm run zen:smoke
  * See docs/zen-integration.md for flags and safety notes.
@@ -23,6 +24,7 @@ import {
   assertDisposableProfile,
   sameRealPath,
 } from "./profile.mjs";
+import { detectInstallRoot, install as installPersistent } from "./install-lib.mjs";
 
 const SANDBOX = "svalinn-smoke";
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -69,6 +71,9 @@ export function parseArgs(argv) {
     timeoutMs: DEFAULT_TIMEOUT_MS,
     json: false,
     skipRestart: false,
+    installed: false,
+    installRoot: null,
+    skipPreflight: false,
     help: false,
   };
 
@@ -96,6 +101,15 @@ export function parseArgs(argv) {
         break;
       case "--skip-restart":
         options.skipRestart = true;
+        break;
+      case "--installed":
+        options.installed = true;
+        break;
+      case "--install-root":
+        options.installRoot = requireValue(argv, ++index, arg);
+        break;
+      case "--skip-preflight":
+        options.skipPreflight = true;
         break;
       case "--port":
         options.port = Number(requireValue(argv, ++index, arg));
@@ -284,6 +298,50 @@ function zenArgs({ profile, port, headless }) {
   ];
 }
 
+function installedStartupArgs({ profile, headless }) {
+  return [
+    "--profile",
+    profile,
+    "--no-remote",
+    "--new-instance",
+    ...(headless ? ["--headless"] : []),
+  ];
+}
+
+export async function preflightInstalledStartup(options, profile) {
+  const child = new ZenProcess(
+    options.zen,
+    installedStartupArgs({ profile, headless: options.headless }),
+    options
+  ).start();
+  const waitMs = Math.min(options.timeoutMs, 15_000);
+  await new Promise(resolve => setTimeout(resolve, waitMs));
+  await child.stop();
+  const prefs = await fs
+    .readFile(path.join(profile, "prefs.js"), "utf8")
+    .catch(() => "");
+  const stringPref = name => {
+    const match = prefs.match(
+      new RegExp(`user_pref\\("${name.replace(/[.]/g, "\\.")}",\\s*"([^"]*)"\\);`)
+    );
+    return match?.[1] ?? null;
+  };
+  const intPref = name => {
+    const match = prefs.match(
+      new RegExp(`user_pref\\("${name.replace(/[.]/g, "\\.")}",\\s*(\\d+)\\);`)
+    );
+    return match ? Number(match[1]) : null;
+  };
+  return {
+    exited: child.exited,
+    status: stringPref("svalinn.status"),
+    loaderVersion: stringPref("svalinn.loaderVersion"),
+    lastError: stringPref("svalinn.lastError"),
+    windows: intPref("svalinn.guardWindows"),
+    output: child.diagnostics(),
+  };
+}
+
 async function connectAndVerify({ client, profile, port, child }) {
   const session = await client.newSession();
   const capabilities = session?.capabilities ?? {};
@@ -325,7 +383,10 @@ function adapterPrelude(body) {
   return `
 const win = [...Services.wm.getEnumerator("navigator:browser")][0];
 if (!win) throw new Error("no browser window");
-const api = globalThis.Svalinn;
+const hidden = (() => {
+  try { return Services.appShell.hiddenDOMWindow; } catch { return null; }
+})();
+const api = globalThis.Svalinn ?? win.Svalinn ?? hidden?.Svalinn;
 if (!api) throw new Error("Svalinn adapter is not injected");
 ${body}`;
 }
@@ -348,7 +409,50 @@ async function runAdapter(client, body, options = {}) {
   return runScript(client, adapterPrelude(body), options);
 }
 
-async function ensureAdapter(client, timeoutMs) {
+async function ensureAdapter(client, timeoutMs, { installed = false } = {}) {
+  if (installed) {
+    const waitMs = Math.min(timeoutMs, 45_000);
+    const present = await runScript(
+      client,
+      `
+const getApi = () => {
+  if (globalThis.Svalinn) return globalThis.Svalinn;
+  for (const win of Services.wm.getEnumerator("navigator:browser")) {
+    if (win.Svalinn) return win.Svalinn;
+  }
+  try {
+    return Services.appShell.hiddenDOMWindow?.Svalinn ?? null;
+  } catch {
+    return null;
+  }
+};
+const deadline = Date.now() + ${waitMs};
+let api = getApi();
+while (!api && Date.now() < deadline) {
+  await new Promise(resolve => setTimeout(resolve, 100));
+  api = getApi();
+}
+if (!api) return { present: false };
+globalThis.Svalinn = api;
+return {
+  present: true,
+  adapter: api.version ?? null,
+  marker: api.marker ?? null,
+  policy: Object.keys(api.policy ?? {}),
+  installed: Boolean(api.snapshot?.().installed),
+  status: Services.prefs.getStringPref("svalinn.status", ""),
+  loaderVersion: Services.prefs.getStringPref("svalinn.loaderVersion", ""),
+  windows: Services.prefs.getIntPref("svalinn.guardWindows", 0),
+};
+`,
+      { timeoutMs: waitMs + 10_000 }
+    );
+    if (!present?.present) {
+      throw new SmokeError("Installed Svalinn loader did not expose the adapter");
+    }
+    return present;
+  }
+
   const present = await runScript(
     client,
     `return typeof globalThis.Svalinn === "object" && globalThis.Svalinn !== null;`,
@@ -654,7 +758,14 @@ await nativeScenario("drag-folder-same-zone-native", folderSource, pinnedB, "pin
 const second = win.OpenBrowserWindow();
 await new Promise(resolve => second.addEventListener("load", resolve, { once: true }));
 const secondReady = Date.now() + 5000;
-while (!second.__svalinn?.hookedWindows?.() && Date.now() < secondReady) {
+while (
+  Date.now() < secondReady &&
+  !(
+    second.__svalinn &&
+    second.gBrowser?.["__svalinnCloseHook"] &&
+    second.gBrowser?.tabContainer?.tabDragAndDrop?.["__svalinnDropHook"]
+  )
+) {
   await wait(100);
 }
 const secondPinned = second.gBrowser.addTab("about:blank", {
@@ -1766,6 +1877,36 @@ export async function runSmoke(options) {
     log(`Profile: ${profileInfo.profile}`);
     report.profileCreated = profileInfo.created;
 
+    if (options.installed) {
+      const root = options.installRoot
+        ? options.installRoot
+        : (await detectInstallRoot()).root;
+      const installedFiles = await installPersistent({
+        profile: profileInfo.profile,
+        installRoot: root,
+      });
+      report.install = installedFiles;
+      log(
+        `Installed persistent loader in ${installedFiles.installRoot} ` +
+          `(Zen ${installedFiles.zenVersion})`
+      );
+
+      if (!options.skipPreflight) {
+        const preflight = await preflightInstalledStartup(
+          options,
+          profileInfo.profile
+        );
+        record(
+          "installed-startup-without-marionette",
+          preflight.exited === true &&
+            preflight.status === "installed" &&
+            preflight.loaderVersion === "0.1.0" &&
+            preflight.windows >= 1,
+          preflight
+        );
+      }
+    }
+
     const launch = async () => {
       processHandle = new ZenProcess(
         options.zen,
@@ -1837,14 +1978,24 @@ return { display, activeMarker };
       { timeoutMs: 20_000 }
     );
     record(
-      "css-inactive-before-install",
-      preCss.activeMarker === false,
+      options.installed ? "css-active-from-loader" : "css-inactive-before-install",
+      options.installed
+        ? preCss.activeMarker === true
+        : preCss.activeMarker === false,
       preCss
     );
 
     phase = "injection";
-    const injected = await ensureAdapter(client, 30_000);
-    record("adapter-injected", injected.adapter === "0.5.0" && injected.policy.length >= 4, injected);
+    const injected = await ensureAdapter(client, 30_000, {
+      installed: options.installed,
+    });
+    record(
+      "adapter-injected",
+      injected.adapter === "0.5.0" &&
+        injected.policy.length >= 4 &&
+        (!options.installed || injected.installed === true),
+      injected
+    );
 
     const probe = await runAdapter(
       client,
@@ -1853,11 +2004,17 @@ return { display, activeMarker };
     record("capabilities", probe.ok === true && probe.isZen === true, probe);
 
     phase = "install";
-    const installed = await runAdapter(
-      client,
-      `return await api.install({ enabled: true, waitForStartup: true, timeoutMs: 30000 });`
+    const installed = options.installed
+      ? { status: "installed", changedTabs: false }
+      : await runAdapter(
+          client,
+          `return await api.install({ enabled: true, waitForStartup: true, timeoutMs: 30000 });`
+        );
+    record(
+      "adapter-installed",
+      installed.status === "installed" && installed.changedTabs === false,
+      installed
     );
-    record("adapter-installed", installed.status === "installed" && installed.changedTabs === false, installed);
 
     const hookState = await runAdapter(
       client,
@@ -2062,7 +2219,14 @@ const win = [...Services.wm.getEnumerator("navigator:browser")][0];
 const second = win.OpenBrowserWindow();
 await new Promise(resolve => second.addEventListener("load", resolve, { once: true }));
 const deadline = Date.now() + 5000;
-while (!second.__svalinn && Date.now() < deadline) {
+while (
+  Date.now() < deadline &&
+  !(
+    second.__svalinn &&
+    second.gBrowser?.["__svalinnCloseHook"] &&
+    second.gBrowser?.tabContainer?.tabDragAndDrop?.["__svalinnDropHook"]
+  )
+) {
   await new Promise(resolve => setTimeout(resolve, 100));
 }
 const attached = Boolean(second.__svalinn);
@@ -2127,7 +2291,7 @@ return {
       log("Restarting Zen with the same profile...");
       await launch();
       await waitForZenReady(client, options.timeoutMs);
-      await ensureAdapter(client, 30_000);
+      await ensureAdapter(client, 30_000, { installed: options.installed });
       const restoredSnapshot = await runAdapter(client, `return api.snapshot();`);
       const restored = zoneMap(restoredSnapshot, profileInfo.urls);
       const restoredProblems = expectZoneMap(restored, profileInfo.urls);
@@ -2136,10 +2300,12 @@ return {
         restoredProblems.length === 0,
         { expected, restored, problems: restoredProblems, windows: restoredSnapshot.windows.length }
       );
-      const restoredInstall = await runAdapter(
-        client,
-        `return await api.install({ enabled: true });`
-      );
+      const restoredInstall = options.installed
+        ? { status: "already-installed" }
+        : await runAdapter(
+            client,
+            `return await api.install({ enabled: true });`
+          );
       const afterRestartInstall = fingerprint(
         await runAdapter(client, `return api.snapshot();`)
       );
@@ -2152,7 +2318,7 @@ return {
       );
       record(
         "restart-reattach-safe",
-        restoredInstall.status === "installed" &&
+        ["installed", "already-installed"].includes(restoredInstall.status) &&
           restoredHooks.drop >= 1 &&
           restoredHooks.close >= 1 &&
           afterRestartInstall === fingerprint(restoredSnapshot),
@@ -2205,6 +2371,10 @@ Options:
   --keep-profile      Keep a generated temporary profile for inspection
   --headless          Pass --headless to Zen
   --skip-restart      Skip the restart/session-restore phase
+  --installed         Test a persistent autoconfig installation instead of
+                      injecting through Marionette
+  --install-root <dir> Zen installation root used with --installed
+  --skip-preflight    Skip the no-Marionette startup check (installed mode)
   --port <n>          Marionette port (default: 2828)
   --timeout <ms>      Startup/connect timeout (default: 60000)
   --json              Print the report as JSON
